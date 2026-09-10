@@ -1,0 +1,15 @@
+/*
+!.gitignore
+!README.md
+!main.py
+!config.py
+!Core/
+!Core/**
+!Rules/
+!Rules/**
+!scripts/
+!scripts/**
+
+# 白名单目录内仍需排除的构建产物
+__pycache__/
+*.py[cod]
