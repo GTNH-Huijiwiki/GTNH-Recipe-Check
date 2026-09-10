@@ -16,7 +16,6 @@
 - [数据流](#数据流)
 - [输出产物](#输出产物)
 - [机器专属规则（Rules/）](#机器专属规则rules)
-- [复核工具](#复核工具)
 - [术语定义](#术语定义)
 - [方案流程](#方案流程)
 - [常见问题](#常见问题)
@@ -29,8 +28,6 @@
 GTNH-Recipe-Check/
 ├── main.py                       # 主流程入口（1 清洗 → 2 删减 → 3 冲突图/着色）
 ├── config.py                     # 集中配置（数据目录、机器白名单、输出与着色参数）
-├── check_recipe_conflict.py      # CLI：按两个 recipeId 复核是否串配方
-├── manual_check.py               # CLI：手动输入催化组方案，检查组内串配方
 ├── README.md
 ├── Core/                         # 通用核心逻辑（库，与具体机器无关）
 │   ├── data_loader.py            # 读取机器配方 / 物品翻译 / 矿辞典
@@ -46,21 +43,13 @@ GTNH-Recipe-Check/
 ├── Rules/                        # 机器专属规则（在 2、催化组删减之前执行）
 │   ├── registry.py               # 机器名 → cleaner 注册表
 │   ├── assembler.py              # 组装机
-│   ├── fluidchemicaleactor.py    # 流体化学反应器
+│   ├── fluidchemicaleactor.py    # 化工厂
 │   └── laserengraver.py          # 激光蚀刻机
 ├── scripts/
 │   └── split.py                  # 数据准备：Dumper 导出 → Data/<版本>/
-├── profiling/                    # 性能 / 一致性验证脚本（本地辅助，不入库）
-│   ├── benchmark_scale.py        # 多规模耗时测量（复杂度阶数）
-│   ├── build_conflict_profile.py # 3.1 建图 cProfile 分析
-│   └── verify_optimization.py    # 快速判定与原始 Counter 判定的一致性验证
 ├── Data/                         # split.py 的产物，main.py 的输入
 └── Output/                       # main.py 的产物（见「输出产物」）
 ```
-
-**各层职责**：`Core/` 是可复用的库（不含机器与配置依赖）；`Rules/` 只放机器专属规则；`scripts/` 放一次性数据处理脚本；根目录只保留入口（`main.py` / `config.py` / 两个复核 CLI）。
-
-> 版本控制只保留最小功能集：`Core/`、`Rules/`、`scripts/`、`main.py`、`config.py`、两个复核 CLI、`README.md`；`Data/`、`Output/`、`profiling/`、`experiments/`、`.vscode/` 均不入库，见 `.gitignore`。
 
 ---
 
@@ -78,7 +67,7 @@ GTNH-Recipe-Check/
 
 ### 什么时候跑 split
 
-只有当你手上有了**新的 Dumper 导出**时才需要：
+只有没有导出Data或当你手上有了**新的 Dumper 导出**时才需要：
 
 ```bash
 python scripts/split.py                # items + oredict + recipes（同一进程内依次执行）
@@ -153,7 +142,7 @@ python main.py --rebuild   # 强制重算 1 清洗与 2 删减
 | `COLORING_ROUNDS` | 冲突图着色的随机探索轮数，越大越可能找到更优解 | `128` |
 | `COLOR_CLASS_MAX_SIZE` | 单个颜色类允许的最大节点数；`None` 表示不限制 | `None` |
 
-白名单中的机器若在所有来源目录都找不到，程序会**报错停止**（不会静默产出空结果）。
+白名单中的机器若在所有来源目录都找不到，程序会**报错停止**。
 
 另有位于 `Core/ore_dictionary.py` 的开关 `EXPAND_WILDCARD_32767`（不放在 config）：控制 `:32767` 通配 meta 是否展开为具体 key。
 
@@ -196,25 +185,10 @@ flowchart LR
 已注册规则：
 
 - `assembler.py`（组装机）：删除输入仅为 `Capacity Bottle` / `Memory Bus` / `Volumetric Flask` 的配方；按目标催化组删除或裁剪分组；删除「催化组含编程电路 24 且输出物品全为 Cable」的配方。
-- `fluidchemicaleactor.py`（流体化学反应器）：把每个催化组的催化剂部分置空，只保留编程电路。
+- `fluidchemicaleactor.py`（化工厂）：把每个催化组的催化剂部分置空，只保留编程电路。
 - `laserengraver.py`（激光蚀刻机）：删除若干特定输入/输出形状的配方。
 
 新增机器规则：在 `Rules/` 下新建 `<机器>.py` 实现 `clean`，并在 `Rules/registry.py` 的 `_MACHINE_CLEANERS` 中注册。未注册的机器使用默认 cleaner（原样返回）。
-
----
-
-## 复核工具
-
-```bash
-# 按两个 recipeId 判断是否构成串配方
-python check_recipe_conflict.py <machine> <recipeId_A> <recipeId_B>
-
-# 手动输入催化组方案，检查方案内各组是否串配方（默认示例对应 laserengraver）
-python manual_check.py
-python manual_check.py "{[Ruby Lens],[]},{[Sapphire Lens],[]}"
-```
-
-两者均在工作目录为仓库根时使用（`check_recipe_conflict.py` 读取 `Output/filtered_recipes/`）。
 
 ---
 
