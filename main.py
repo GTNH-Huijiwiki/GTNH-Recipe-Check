@@ -16,6 +16,7 @@ from Core.recipe_checker import (
     abstract_group_map,
     assign_recipe_ids,
     build_conflict_graph,
+    group_output_order_key,
     readable_group_label,
 )
 from Core.catalyst_reducer import reduce_catalyst_groups
@@ -84,22 +85,76 @@ def _cleaned_entry(original_name, source_name, base_name, output_file):
 
 
 def _coloring_objective(coloring):
-    """着色优劣：催化组数越少越好，其次最大催化组覆盖的配方数越小越好。"""
+    """着色优劣：催化组数越少越好；并列时按「各催化组覆盖配方数」降序逐位比较。
+
+    即把各催化组覆盖的配方数列成列表从大到小排序，从最大组起逐位比较，
+    谁先更大谁更差。历史方案缺少明细列表时，以最大组值补齐（保守估计，
+    不会把信息不全的旧方案误判为更优）。
+    """
+    color_count = coloring.get("color_count", 0)
+    sizes = coloring.get("recipe_class_sizes")
+    if not sizes:
+        largest = coloring.get("largest_recipe_class", 1 << 30)
+        sizes = [largest] * max(1, color_count)
+    return (color_count, tuple(sizes))
+
+
+def _coloring_config_signature():
+    """当前着色搜索配置（与历史方案比对，配置不同则不复用历史结果）。"""
     return (
-        coloring.get("color_count", 0),
-        coloring.get("largest_recipe_class", 1 << 30),
+        config.COLOR_CLASS_MAX_SIZE,
+        config.COLOR_CLASS_SIZE_SWEEP,
+        config.COLOR_CLASS_SIZE_SWEEP_MAX,
+        config.COLORING_ROUNDS,
     )
 
 
+def _coloring_config_of(coloring):
+    """历史方案记录着的搜索配置；旧文件缺字段时为 None，与当前配置不相等。"""
+    return (
+        coloring.get("max_class_size"),
+        coloring.get("size_sweep"),
+        coloring.get("sweep_max_size"),
+        coloring.get("rounds"),
+    )
+
+
+def _coloring_within_limit(coloring):
+    """历史方案是否满足当前的硬上限（单色类节点数不得超过 COLOR_CLASS_MAX_SIZE）。"""
+    limit = config.COLOR_CLASS_MAX_SIZE
+    if limit is None:
+        return True
+    largest = coloring.get("largest_color_class")
+    if largest is None:
+        sizes = [color.get("size", 0) for color in coloring.get("colors", [])]
+        largest = max(sizes) if sizes else 0
+    return largest <= limit
+
+
 def _coloring_summary(machine_name, coloring, merged_groups, fingerprint):
-    """把选定着色方案整理为写入 coloring.json 的摘要。"""
+    """把选定着色方案整理为写入 coloring.json 的摘要。
+
+    各组（含终端列表）按输出规则排序：无编程电路的组排最后，
+    其余按组内最小编号升序（见 `group_output_order_key`）。
+    """
+    colors = sorted(
+        coloring["colors"],
+        key=lambda color: group_output_order_key(merged_groups[color["id"]]),
+    )
     return {
         "machine": machine_name,
         "color_count": coloring["color_count"],
         "largest_color_class": coloring["largest_color_class"],
         "largest_recipe_class": coloring["largest_recipe_class"],
+        "recipe_class_sizes": coloring.get("recipe_class_sizes", []),
         "max_class_size": coloring["max_class_size"],
-        "colors": coloring["colors"],
+        "best_max_class_size": coloring.get("best_max_class_size"),
+        "swept_max_class_sizes": coloring.get("swept_max_class_sizes", []),
+        # 复现该方案所需的搜索配置（供下次运行判断能否沿用历史结果）
+        "size_sweep": config.COLOR_CLASS_SIZE_SWEEP,
+        "sweep_max_size": config.COLOR_CLASS_SIZE_SWEEP_MAX,
+        "rounds": config.COLORING_ROUNDS,
+        "colors": colors,
         "node_colors": coloring["node_colors"],
         "merged_groups": merged_groups,
         "best_round": coloring.get("best_round"),
@@ -108,12 +163,16 @@ def _coloring_summary(machine_name, coloring, merged_groups, fingerprint):
 
 
 def _print_coloring(result, abstract_groups, note=""):
+    limit = result.get("best_max_class_size")
+    limit_text = "不限" if limit is None else str(limit)
     print(
         f"机器 {result['machine']} 着色完成{note}: "
         f"{result['color_count']} 个催化组，最大组覆盖 "
         f"{result['largest_recipe_class']} 个配方"
-        f"（{result['largest_color_class']} 个节点）。"
+        f"（{result['largest_color_class']} 个节点，"
+        f"单色类节点数上限={limit_text}）。"
     )
+    print(f"  各组覆盖配方数（降序）: {result.get('recipe_class_sizes', [])}")
     for color in result["colors"]:
         group = result["merged_groups"][color["id"]]
         label = readable_group_label(group, abstract_groups)
@@ -349,19 +408,33 @@ def run_color_recipes(filtered_machine_recipes, this_run_keys, abstract_groups):
     logger.info("========== 3.1 构建催化组冲突图 ==========")
     _ensure_dir(config.COLORED_RECIPES_DIR)
 
-    conflict_graphs = [
-        build_conflict_graph(machine_name, recipes)
-        for machine_name, recipes in filtered_machine_recipes
-    ]
+    conflict_graphs = []
+    empty_conflict_reports = []
+    for machine_name, recipes in filtered_machine_recipes:
+        report = {}
+        conflict_graphs.append(
+            build_conflict_graph(
+                machine_name, recipes, abstract_groups,
+                config.LOG_EMPTY_CONFLICT_CONSOLE,
+                empty_conflict_report=report,
+            )
+        )
+        empty_conflict_reports.append(report)
     _merge_machine_file(
         config.FILTERED_RECIPES_DIR / "conflict_graph.json",
         this_run_keys,
         conflict_graphs,
     )
+    _merge_machine_file(
+        config.EMPTY_CONFLICT_FILE,
+        this_run_keys,
+        empty_conflict_reports,
+    )
     logger.info(
         "已生成: %s",
         config.FILTERED_RECIPES_DIR / "conflict_graph.json",
     )
+    logger.info("已生成: %s", config.EMPTY_CONFLICT_FILE)
     logger.info("3.1 步骤完成。")
 
     logger.info("========== 3.2 冲突图着色与催化组合并 ==========")
@@ -379,12 +452,17 @@ def run_color_recipes(filtered_machine_recipes, this_run_keys, abstract_groups):
             config.COLORING_ROUNDS,
             config.COLOR_CLASS_MAX_SIZE,
             node_coverages(recipes, graph),
+            size_sweep=config.COLOR_CLASS_SIZE_SWEEP,
+            sweep_max_size=config.COLOR_CLASS_SIZE_SWEEP_MAX,
         )
         fingerprint = graph_fingerprint(graph)
         previous = previous_by_machine.get(machine_name)
         if (
             previous
             and previous.get("graph_fingerprint") == fingerprint
+            # 历史方案必须与当前搜索配置同源，且满足当前硬上限（单色类节点数）
+            and _coloring_config_of(previous) == _coloring_config_signature()
+            and _coloring_within_limit(previous)
             and _coloring_objective(previous) <= _coloring_objective(new_coloring)
         ):
             # 图未变且历史方案不差：沿用历史最优，仅重新套用到当前配方
@@ -399,6 +477,22 @@ def run_color_recipes(filtered_machine_recipes, this_run_keys, abstract_groups):
             )
             chosen, note = previous, "（沿用历史更优）"
         else:
+            if previous:
+                if previous.get("graph_fingerprint") != fingerprint:
+                    logger.info("机器 %s 冲突图已变，重新着色。", machine_name)
+                elif _coloring_config_of(previous) != _coloring_config_signature():
+                    logger.info(
+                        "机器 %s 着色配置已变（历史 max_class_size=%s），重新着色。",
+                        machine_name,
+                        previous.get("max_class_size"),
+                    )
+                elif not _coloring_within_limit(previous):
+                    logger.info(
+                        "机器 %s 历史方案最大类 %s 个节点，超过当前上限 %s，重新着色。",
+                        machine_name,
+                        previous.get("largest_color_class"),
+                        config.COLOR_CLASS_MAX_SIZE,
+                    )
             chosen, note = new_coloring, ""
 
         colored_recipes, merged_groups = apply_coloring(recipes, graph, chosen)

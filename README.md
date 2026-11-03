@@ -44,7 +44,8 @@ GTNH-Recipe-Check/
 │   ├── registry.py               # 机器名 → cleaner 注册表
 │   ├── assembler.py              # 组装机
 │   ├── fluidchemicaleactor.py    # 化工厂
-│   └── laserengraver.py          # 激光蚀刻机
+│   ├── laserengraver.py          # 激光蚀刻机
+│   └── press.py                  # 冲压机床
 ├── scripts/
 │   └── split.py                  # 数据准备：Dumper 导出 → Data/<版本>/
 ├── Data/                         # split.py 的产物，main.py 的输入
@@ -132,15 +133,18 @@ python main.py --rebuild   # 强制重算 1 清洗与 2 删减
 | `DUMPER_DIR` | GTNH Dumper 导出的原始数据目录，`scripts/split.py` 的输入（需包含的文件见上节「DUMPER_DIR 需要包含的文件」） | 见文件内绝对路径 |
 | `DATA_SPLIT_DIR` | split 的输出目录，即数据集根目录 | `./Data/2.9.0-beta-3` |
 | `DATA_DIR` | `main.py` 读取的数据根目录，默认等于 `DATA_SPLIT_DIR` | `= DATA_SPLIT_DIR` |
-| `INTERESTED_MACHINES` | 本次要处理的机器白名单（可填多台）。机器名 = 导出文件名去掉 `GTNEIDefaultHandler_` 前缀与 `.json` 后缀 | `{"fluidchemicaleactor"}` |
+| `INTERESTED_MACHINES` | 本次要处理的机器白名单（可填多台）。机器名 = 导出文件名去掉 `GTNEIDefaultHandler_` 前缀与 `.json` 后缀 | `{"alloyblastsmelter", "assembler", "fluidchemicaleactor", "largechemicalreactor", "laserengraver", "multimixer", "press"}` |
 | `RECIPE_SOURCE_DIRS` | 在 `Recipes/` 下搜索机器的来源 mod 目录；同一机器名出现在多个来源时按来源分别输出（文件名加 `__来源` 后缀） | `("gregtech", "miscutils")` |
 | `OUTPUT_ROOT` | 输出根目录 | `Output` |
 | `LOG_FILE` | 运行日志路径 | `Output/recipe_check.log` |
 | `CLEANED_RECIPES_DIR` | 1 清洗产物目录 | `Output/cleaned_recipes` |
 | `FILTERED_RECIPES_DIR` | 2 过滤产物目录 | `Output/filtered_recipes` |
 | `COLORED_RECIPES_DIR` | 3 着色产物目录 | `Output/colored_recipes` |
-| `COLORING_ROUNDS` | 冲突图着色的随机探索轮数，越大越可能找到更优解 | `128` |
+| `COLORING_ROUNDS` | 冲突图着色每个「单色类最大节点数」档位的随机探索轮数，越大越可能找到更优解 | `128` |
 | `COLOR_CLASS_MAX_SIZE` | 单个颜色类允许的最大节点数；`None` 表示不限制 | `None` |
+| `COLOR_CLASS_SIZE_SWEEP` | 是否按「单色类最大节点数」从小到大多档扫描（每档 `COLORING_ROUNDS` 轮）；各档统一目标函数比较，仍取全局最优 | `True` |
+| `COLOR_CLASS_SIZE_SWEEP_MAX` | 逐 1 扫描的最大档位（从 2 起）；`None` 表示扫到 `COLOR_CLASS_MAX_SIZE` 或节点数 | `12` |
+| `LOG_EMPTY_CONFLICT_CONSOLE` | 空催化组（编程电路0）与其它催化组的串配方单向检查是否在终端显示；`False` 时只在日志文件中记录 | `False` |
 
 白名单中的机器若在所有来源目录都找不到，程序会**报错停止**。
 
@@ -172,9 +176,10 @@ flowchart LR
 | `Output/filtered_recipes/{machine}.json` | 规则删减 + 催化组删减后的配方（含 `recipeId`） |
 | `Output/filtered_recipes/index.json` | 已过滤机器索引 |
 | `Output/filtered_recipes/catalyst_reduction.json` | 催化组删减元数据（关系分量、顶层候选、等价组、抽象催化剂） |
-| `Output/filtered_recipes/conflict_graph.json` | 各机器冲突图（节点、邻接矩阵；仅下三角非零） |
-| `Output/colored_recipes/{machine}.json` | 着色后配方（催化组已替换为合并后的颜色组） |
-| `Output/colored_recipes/coloring.json` | 着色方案汇总（最优轮次 `best_round`、颜色、节点归属、合并后催化组） |
+| `Output/filtered_recipes/conflict_graph.json` | 各机器冲突图（节点、邻接矩阵；仅下三角非零；含空催化组串配方计数 `empty_group_conflict_counts`） |
+| `Output/filtered_recipes/empty_group_conflicts.json` | 空催化组（编程电路0）单向串配方**全量**报告（逐对列出 `recipeId` 与输入输出摘要、涉及的两个催化组及其配方数） |
+| `Output/colored_recipes/{machine}.json` | 着色后配方（催化组已替换为合并后的颜色组；组按「组内最小电路编号升序、无电路的组最后」排列） |
+| `Output/colored_recipes/coloring.json` | 着色方案汇总（最优轮次 `best_round`、颜色、节点归属、合并后催化组、各组覆盖配方数降序 `recipe_class_sizes`；`colors` 按输出组序排列） |
 
 ---
 
@@ -184,9 +189,10 @@ flowchart LR
 
 已注册规则：
 
-- `assembler.py`（组装机）：删除输入仅为 `Capacity Bottle` / `Memory Bus` / `Volumetric Flask` 的配方；按目标催化组删除或裁剪分组；删除「催化组含编程电路 24 且输出物品全为 Cable」的配方。
+- `assembler.py`（组装机）：删除输入仅为`Volumetric Flask` 的配方；按目标催化组删除或裁剪分组；删除「催化组含编程电路 24 且输出物品全为 Cable」的配方。
 - `fluidchemicaleactor.py`（化工厂）：把每个催化组的催化剂部分置空，只保留编程电路。
 - `laserengraver.py`（激光蚀刻机）：删除若干特定输入/输出形状的配方。
+- `press.py`（冲压机床）：删除输出物品全部为 `Extruder Shape`（模头）或全部为 `Mold`（模具）的复制型配方；删除普通输入中含 `originalName` 严格为 `Dough`（面团）的配方。
 
 新增机器规则：在 `Rules/` 下新建 `<机器>.py` 实现 `clean`，并在 `Rules/registry.py` 的 `_MACHINE_CLEANERS` 中注册。未注册的机器使用默认 cleaner（原样返回）。
 
@@ -269,14 +275,17 @@ $$ Recipes(G) = \bigcup_{\emptyset \neq S \subseteq G} Recipes(S) $$
      `左→右 ⇔ 输入(右) ⊆ 输入(左)`，`右→左` 对称。
    - **输出相等豁免**：若两配方输出（物品+流体，忽略数量）**完全相同**，则即使输入构成包含也视为良性连带，不判为串配方（不记自冲突、不连边）。
    - **自冲突**：落在同一催化组内、且构成串配方的非等效配方对，记入日志（无法靠分组解决）。
+   - **空催化组（编程电路0）单向全量检查**：空催化组无任何触发条件，只统计「其它组配方 → 空组配方」这一个方向，即空组配方的材料输入 ⊆ 其它组配方的材料输入（做其它催化组配方时会连带触发空组配方）；反向（做空组配方连带触发对方）不统计。判定对全部配方对做全量枚举，按「空组 × 对方组」汇总：**全量逐对结果写入 `Output/filtered_recipes/empty_group_conflicts.json`**（每对含 `recipeId`、输入输出摘要、两个催化组及其配方数；`conflict_graph.json` 的 `empty_group_conflict_counts` 只保留计数）。`recipe_check.log` 只列每对组的示例（`_EMPTY_CONFLICT_SAMPLE_LIMIT`，默认 3 条）并标注从略条数；报告始终写入日志，是否在终端显示由 `config.LOG_EMPTY_CONFLICT_CONSOLE` 控制（默认 `False`，只写日志）。
 2. **着色**（`color_graph` + `apply_coloring`）：
    - 相邻节点必须不同色（即冲突的催化组不能共处同一缓存）；
    - 同色节点合并为一个新催化组；
-   - 目标：**催化组数（颜色数）最少**；并列时，单个催化组覆盖的配方数最大值尽量小。
+   - 目标：**催化组数（颜色数）最少**；并列时，把各催化组覆盖的配方数**从大到小**排成列表逐位比较，先更大者更差（即先最小化最大组，再最小化第二大组，依此类推）。`coloring.json` 的 `recipe_class_sizes` 记录了该降序列表。
    - 探索方式：选点按 DSATUR（饱和度、度数，随机打破平局）；取色以最小可用色为主，并按概率随机偏离去，解决「各轮目标值完全相同」的探索性不足（`Core/graph_coloring.py` 的 `_COLOR_EXPLORE_PROB` / `_MAX_COLOR_CHOICES`）。
+   - **档位扫描**：把「单色类最大节点数」从 2 逐 1 放宽到 `COLOR_CLASS_SIZE_SWEEP_MAX`（再追加不限制档）逐档探索，每档 `COLORING_ROUNDS` 轮。限制节点数只是搜索期的启发式约束，**不改变目标函数**：受限档位同样是合法着色，因此各档候选（含不限制档）统一比较，最终仍取全局最优。实测限制节点数能显著改善“各组配方数降序”这一目标（`multimixer` / `fluidchemicaleactor` / `laserengraver` 等）。
    - 多轮随机探索后**只保留并输出最优一轮**（`coloring.json` 中的 `best_round` 记录其轮号）。
    - **跨次运行也只保留最优**：`graph_fingerprint` 一致（冲突图未变）且历史方案不差时，沿用历史结果并重新套用到当前配方。
    - 合并后的催化组可含多个编程电路，标签展示时按编号升序，无编号的「编程电路0」排最前。
+   - **输出组间排序**（`group_output_order_key`）：`colored_recipes/{machine}.json` 中每条配方的催化组、`coloring.json` 与终端列出的各组，均按「组内最小编号升序」排列；无编程电路的组排最后；完全空组（无条件反应）视作「编程电路0」排最前。
 
 ---
 

@@ -84,11 +84,7 @@ def clean(recipes):
         input_items = recipe.get("inputItems", [])
         input_names = [item.get("originalName", "") for item in input_items]
 
-        # 删除条件：输入仅为容量瓶 / 存储总线 / Volumetric Flask
-        if set(input_names) == {"Capacity Bottle"}:
-            continue
-        if set(input_names) == {"Memory Bus"}:
-            continue
+        # 删除条件：输入仅为容量瓶
         if set(input_names) == {"Volumetric Flask"}:
             continue
 

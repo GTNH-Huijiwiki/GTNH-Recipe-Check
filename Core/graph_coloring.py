@@ -5,7 +5,11 @@ import random
 from collections import Counter
 from copy import deepcopy
 
-from Core.recipe_checker import group_signature, item_signature
+from Core.recipe_checker import (
+    group_output_order_key,
+    group_signature,
+    item_signature,
+)
 
 # 取色探索：每步以 _COLOR_EXPLORE_PROB 的概率不取最小可用色，
 # 而从前 _MAX_COLOR_CHOICES 个可用色中随机取一个，以增加解的多样性。
@@ -19,15 +23,18 @@ def edge_exists(adjacency_matrix, left, right):
     return bool(adjacency_matrix[left][right])
 
 
-def _greedy_round(adjacency_matrix, node_count, round_index, max_class_size=None):
+def _greedy_round(
+    adjacency_matrix, node_count, seed, max_class_size=None, explore=True,
+):
     """一轮随机化 DSATUR 贪心，返回长度 node_count 的颜色数组。
 
     选点：DSATUR（饱和度、度数），平局用随机数打破。
-    取色：第 0 轮为纯 first-fit（保底）；后续轮以 _COLOR_EXPLORE_PROB 的概率
-    改取前几个可用色之一——否则各轮只会收敛到同一个目标值，失去探索意义。
+    取色：explore 为假时为纯 first-fit（保底）；为真时以 _COLOR_EXPLORE_PROB
+    的概率改取前几个可用色之一，否则各轮只会收敛到同一个目标值，失去探索意义。
+    max_class_size 限制单个颜色类的节点数（搜索期启发式约束）。
     """
-    randomizer = random.Random(round_index)
-    explore_prob = _COLOR_EXPLORE_PROB if round_index > 0 else 0.0
+    randomizer = random.Random(seed)
+    explore_prob = _COLOR_EXPLORE_PROB if explore else 0.0
     colors = [-1] * node_count
     while -1 in colors:
         uncolored = [index for index, color in enumerate(colors) if color < 0]
@@ -70,20 +77,56 @@ def _greedy_round(adjacency_matrix, node_count, round_index, max_class_size=None
     return colors
 
 
-def _largest_recipe_class(colors, node_coverages):
-    """各颜色类（合并后的催化组）覆盖配方并集大小的最大值。"""
+def _recipe_class_sizes(colors, node_coverages):
+    """各颜色类（合并后的催化组）覆盖配方并集大小，按从大到小排序。
+
+    作为着色的次要目标：从最大组起逐位比较，先更大者更差。
+    """
     class_recipes = {}
     for node_index, color in enumerate(colors):
         class_recipes.setdefault(color, set()).update(node_coverages[node_index])
-    return max(len(recipes) for recipes in class_recipes.values())
+    return sorted(
+        (len(recipes) for recipes in class_recipes.values()), reverse=True
+    )
 
 
-def color_graph(graph, rounds, max_class_size=None, node_coverages=None):
-    """多轮随机化 DSATUR 贪心着色，只保留并返回最优的一轮。
+# 节点数档位扫描：单色类最大节点数从 _SIZE_SWEEP_MIN 起逐 1 放宽
+_SIZE_SWEEP_MIN = 2
 
-    最优准则：催化组数（颜色数）最少；并列时，单个催化组覆盖的配方数最大值最小。
+
+def _size_sweep_limits(max_class_size, node_count, sweep_max_size):
+    """生成「单色类最大节点数」档位序列（从小到大，None 表示不限制）。
+
+    用户上限 max_class_size 为 None 时扫到节点数，否则不超过该上限；
+    sweep_max_size 限制逐 1 扫描的最大档位（None 表示不限）。
+    仅当用户上限为 None 时末尾追加 None 档（不限制）。
+    """
+    upper = node_count if max_class_size is None else max_class_size
+    upper = max(_SIZE_SWEEP_MIN, min(upper, max(_SIZE_SWEEP_MIN, node_count)))
+    limits = [
+        size
+        for size in range(_SIZE_SWEEP_MIN, upper + 1)
+        if sweep_max_size is None or size <= sweep_max_size
+    ]
+    if max_class_size is None:
+        limits.append(None)
+    return limits
+
+
+def color_graph(
+    graph, rounds, max_class_size=None, node_coverages=None,
+    size_sweep=False, sweep_max_size=12,
+):
+    """多轮随机化 DSATUR 贪心着色，只保留并返回全局最优的一轮。
+
+    最优准则：催化组数（颜色数）最少；并列时，把各催化组覆盖的配方数从大到小
+    排成列表逐位比较，先更大者更差（即先最小化最大组，再最小化第二大组，依此类推）。
     node_coverages：每个节点覆盖的配方下标集合（与 graph["nodes"] 同序）；
     为 None 时次准则退化为颜色类内的节点数。
+
+    size_sweep：把「单色类最大节点数」从 _SIZE_SWEEP_MIN 逐 1 放宽多档扫描，
+    每档跑 rounds 轮。限制节点数只是搜索期的启发式约束，不改变目标函数：受限档位
+    同样是合法着色，因此与不限制档公平比较，最终仍取全局最优（含不限制档）。
     """
     nodes = graph["nodes"]
     adjacency_matrix = graph["adjacency_matrix"]
@@ -95,30 +138,42 @@ def color_graph(graph, rounds, max_class_size=None, node_coverages=None):
             "color_count": 0,
             "largest_color_class": 0,
             "largest_recipe_class": 0,
+            "recipe_class_sizes": [],
             "max_class_size": max_class_size,
+            "best_max_class_size": None,
+            "swept_max_class_sizes": [],
             "best_round": None,
         }
 
+    limits = (
+        _size_sweep_limits(max_class_size, node_count, sweep_max_size)
+        if size_sweep
+        else [max_class_size]
+    )
     best = None
-    for round_index in range(max(1, rounds)):
-        colors = _greedy_round(
-            adjacency_matrix, node_count, round_index, max_class_size
-        )
-        class_sizes = Counter(colors)
-        largest_class = max(class_sizes.values())
-        largest_recipe = (
-            largest_class
-            if node_coverages is None
-            else _largest_recipe_class(colors, node_coverages)
-        )
-        objective = (len(class_sizes), largest_recipe)
-        if best is None or objective < best["objective"]:
-            best = {
-                "objective": objective,
-                "colors": colors,
-                "round": round_index,
-                "largest_color_class": largest_class,
-            }
+    for limit_index, limit in enumerate(limits):
+        for round_index in range(max(1, rounds)):
+            seed = limit_index * max(1, rounds) + round_index
+            colors = _greedy_round(
+                adjacency_matrix, node_count, seed, limit,
+                explore=round_index > 0,
+            )
+            class_sizes = Counter(colors)
+            largest_class = max(class_sizes.values())
+            if node_coverages is None:
+                recipe_class_sizes = sorted(class_sizes.values(), reverse=True)
+            else:
+                recipe_class_sizes = _recipe_class_sizes(colors, node_coverages)
+            objective = (len(class_sizes), tuple(recipe_class_sizes))
+            if best is None or objective < best["objective"]:
+                best = {
+                    "objective": objective,
+                    "colors": colors,
+                    "round": round_index,
+                    "class_size_limit": limit,
+                    "largest_color_class": largest_class,
+                    "recipe_class_sizes": recipe_class_sizes,
+                }
 
     color_nodes = {}
     for node_index, color in enumerate(best["colors"]):
@@ -140,8 +195,13 @@ def color_graph(graph, rounds, max_class_size=None, node_coverages=None):
         "colors": colors_output,
         "color_count": best["objective"][0],
         "largest_color_class": best["largest_color_class"],
-        "largest_recipe_class": best["objective"][1],
+        "largest_recipe_class": (
+            best["recipe_class_sizes"][0] if best["recipe_class_sizes"] else 0
+        ),
+        "recipe_class_sizes": best["recipe_class_sizes"],
         "max_class_size": max_class_size,
+        "best_max_class_size": best["class_size_limit"],
+        "swept_max_class_sizes": limits,
         "best_round": best["round"],
     }
 
@@ -227,7 +287,11 @@ def merge_colored_groups(graph, coloring):
 
 
 def apply_coloring(recipes, graph, coloring):
-    """将原配方中的节点替换为着色后的催化组。"""
+    """将原配方中的节点替换为着色后的催化组。
+
+    每条配方的催化组按输出规则排序（见 `group_output_order_key`）：
+    无编程电路的组排最后，其余按组内最小编号升序。
+    """
     node_by_signature = {
         group_signature(node["group"]): node["id"] for node in graph["nodes"]
     }
@@ -242,5 +306,8 @@ def apply_coloring(recipes, graph, coloring):
             color_id = coloring["node_colors"][node_id]
             if color_id not in color_ids:
                 color_ids.append(color_id)
-        recipe["catalystGroups"] = [merged_groups[color_id] for color_id in color_ids]
+        recipe["catalystGroups"] = sorted(
+            (merged_groups[color_id] for color_id in color_ids),
+            key=group_output_order_key,
+        )
     return colored_recipes, merged_groups
