@@ -47,7 +47,10 @@ GTNH-Recipe-Check/
 │   ├── laserengraver.py          # 激光蚀刻机
 │   └── press.py                  # 冲压机床
 ├── scripts/
-│   └── split.py                  # 数据准备：Dumper 导出 → Data/<版本>/
+│   ├── split.py                  # 数据准备：Dumper 导出 → Data/<版本>/
+│   ├── nbt_identity.py           # split 用 SNBT 规范化
+│   ├── recipe_association.py     # split 用 NBT / :32767 通配归一化与诊断
+│   └── recipe_roles.py           # split 用 otherItems 角色归类
 ├── Data/                         # split.py 的产物，main.py 的输入
 └── Output/                       # main.py 的产物（见「输出产物」）
 ```
@@ -78,7 +81,7 @@ python scripts/split.py recipes        # 仅 Recipes（独立运行无法做 NBT
 python scripts/split.py items recipes  # 多个子步骤（items 必须先于 recipes）
 ```
 
-- `items` 必须先于 `recipes`：Recipes 的 NBT key 解析依赖完整 item 信息（`rawKey`/`nbt`），落盘的 `Items.json` 只保留三列，故只有同一进程内先执行过 `items` 才能解析。
+- `items` 必须先于 `recipes`：Recipes 的 NBT/通配解析依赖完整 item 信息（`rawKey`/`nbt`），落盘的 `Items.json` 只保留三列；解析使用 `nbt_identity` 规范化 SNBT，并递归处理嵌套候选槽位，故两项应在同一进程内执行。
 - 产物目录由 `config.DATA_SPLIT_DIR` 指定；换版本时改这里即可（`main.py` 会自动跟随，因为 `DATA_DIR = DATA_SPLIT_DIR`）。
 
 #### DUMPER_DIR 需要包含的文件
@@ -93,8 +96,8 @@ python scripts/split.py items recipes  # 多个子步骤（items 必须先于 re
 | `recipes/` | 目录树，任意层级的 `*.json` | 每台机器一份配方（如 `recipes/gregtech/GTNEIDefaultHandler_assembler.json`），输出为 `Recipes/<相对路径>` |
 
 - 各子步骤的必需输入：`advitempanel.json` → `items`，`oreDictionary.json` → `oredict`，`recipes/` → `recipes`；此外 `fluid.json` 供 `items` 改写流体 key，`recipes/` 也供 `items` 做 NBT 退行扫描（缺失时提示并跳过）。
-- `recipes/` 下的目录名会被原样保留（`Recipes/<来源mod>/<处理器>.json`），因此 `config.RECIPE_SOURCE_DIRS` 与 `INTERESTED_MACHINES` 必须与这些目录名/文件名匹配。
-- `nbt_regress_cache.json`、`nbt_missing.csv` 是 split 的**产物**（写在 `DATA_SPLIT_DIR`），不需要预先存在。
+- `recipes/` 下的目录名会被原样保留（`Recipes/<来源mod>/<处理器>.json`）；`main.py` 会自动扫描 `Recipes/` 下所有来源目录，只按 `INTERESTED_MACHINES` 匹配机器文件名，不再需要配置来源目录。
+- `nbt_regress_cache.json`、`nbt_missing.csv`、`association_report.json`、`oredictionary_associations.json` 是 split 的**产物**（写在 `DATA_SPLIT_DIR`），不需要预先存在。
 
 ### 什么时候跑 main
 
@@ -130,11 +133,10 @@ python main.py --rebuild   # 强制重算 1 清洗与 2 删减
 
 | 配置项 | 说明 | 当前值 |
 |---|---|---|
-| `DUMPER_DIR` | GTNH Dumper 导出的原始数据目录，`scripts/split.py` 的输入（需包含的文件见上节「DUMPER_DIR 需要包含的文件」） | 见文件内绝对路径 |
-| `DATA_SPLIT_DIR` | split 的输出目录，即数据集根目录 | `./Data/2.9.0-beta-3` |
+| `DUMPER_DIR` | GTNH Dumper 导出的原始数据目录，`scripts/split.py` 的输入（需包含的文件见上节「DUMPER_DIR 需要包含的文件」） | `./Raw/2.9.0` |
+| `DATA_SPLIT_DIR` | split 的输出目录，即数据集根目录 | `./Data/2.9.0` |
 | `DATA_DIR` | `main.py` 读取的数据根目录，默认等于 `DATA_SPLIT_DIR` | `= DATA_SPLIT_DIR` |
 | `INTERESTED_MACHINES` | 本次要处理的机器白名单（可填多台）。机器名 = 导出文件名去掉 `GTNEIDefaultHandler_` 前缀与 `.json` 后缀 | `{"alloyblastsmelter", "assembler", "fluidchemicaleactor", "largechemicalreactor", "laserengraver", "multimixer", "press"}` |
-| `RECIPE_SOURCE_DIRS` | 在 `Recipes/` 下搜索机器的来源 mod 目录；同一机器名出现在多个来源时按来源分别输出（文件名加 `__来源` 后缀） | `("gregtech", "miscutils")` |
 | `OUTPUT_ROOT` | 输出根目录 | `Output` |
 | `LOG_FILE` | 运行日志路径 | `Output/recipe_check.log` |
 | `CLEANED_RECIPES_DIR` | 1 清洗产物目录 | `Output/cleaned_recipes` |
@@ -146,9 +148,9 @@ python main.py --rebuild   # 强制重算 1 清洗与 2 删减
 | `COLOR_CLASS_SIZE_SWEEP_MAX` | 逐 1 扫描的最大档位（从 2 起）；`None` 表示扫到 `COLOR_CLASS_MAX_SIZE` 或节点数 | `12` |
 | `LOG_EMPTY_CONFLICT_CONSOLE` | 空催化组（编程电路0）与其它催化组的串配方单向检查是否在终端显示；`False` 时只在日志文件中记录 | `False` |
 
-白名单中的机器若在所有来源目录都找不到，程序会**报错停止**。
+白名单中的机器若在 `Recipes/` 下所有来源目录都找不到，程序会**报错停止**。
 
-另有位于 `Core/ore_dictionary.py` 的开关 `EXPAND_WILDCARD_32767`（不放在 config）：控制 `:32767` 通配 meta 是否展开为具体 key。
+`:32767` 通配在 split 阶段按物品真实变体展开，并在 `association_report.json` / `oredictionary_associations.json` 中记录无候选项；`Core/ore_dictionary.py` 的 `EXPAND_WILDCARD_32767` 仅作为下游兜底开关。
 
 ---
 
@@ -241,16 +243,17 @@ $$ Recipes(G) = \bigcup_{\emptyset \neq S \subseteq G} Recipes(S) $$
 ## 方案流程
 
 ### 0. 数据准备（scripts/split.py）
-把 Dumper 导出整理为 `Data/<版本>/`：`Items.json`（`key`/`originalName`/`translatedName`）、`OreDictionary.json`（`{矿辞典名: [key...]}`）、`Recipes/<来源>/GTNEIDefaultHandler_<机器>.json`。
+把 Dumper 导出整理为 `Data/<版本>/`：`Items.json`（`key`/`originalName`/`translatedName`）、`OreDictionary.json`（`{矿辞典名: [key...]}`）、`Recipes/<来源>/GTNEIDefaultHandler_<机器>.json`。split 会在此阶段完成名称格式码清理、`nbt_identity` NBT 归一化、`:32767` 通配展开、矿辞通配校验和 `otherItems` 角色归类。
 
 ### 1. 清洗与翻译
 
 - 只处理 `INTERESTED_MACHINES` 白名单内的机器；已有清洗产物且未 `--rebuild` 时直接复用。
 - **输入可选列表展开**：`inputItems`/`outputItems` 中同一项的多个可选对象按笛卡尔积展开为多条配方。
+- **附加槽位归类**：`scripts/recipe_roles.py` 把熔炉/高炉/燃料/作物基因提取器等已知 `otherItems` 归入输入或输出，保留候选顺序、概率和不消耗标记。
 - **拆分催化条件**：带 `nc` 标记的输入项按是否为编程电路，分别归入催化组的 `circuit` / `catalysts`。
 - **矿辞典与通配展开**（`Core/ore_dictionary.py`）：
   - `#矿辞典名` → 查 `OreDictionary.json` 展开为全部成员；
-  - `:32767` 结尾的通配 meta → 取注册表中同前缀的全部 `key`（受 `EXPAND_WILDCARD_32767` 控制，当前为 `True`）。
+  - `:32767` 结尾的通配 meta → split 阶段已按物品真实变体（含 NBT 变体）展开为具体 `key`；无候选项写入 `association_report.json` / `oredictionary_associations.json`。
   - **同名折叠**：若一次展开得到的多个 `key` 其 `(originalName, translatedName)` 完全相同，则折叠为**单个虚拟 key**（`Core/virtual_key.py`），展开退化为「key 替换」，不产生多份等价配方。
 - **等效合并**：输入（物品+流体）与输出（物品+流体）完全相同的配方合并，其催化组合并去重。
 - **翻译**：为物品/流体补充 `originalName` / `translatedName`，**保留 `key` 作为唯一身份键**（映射失败记入日志）。

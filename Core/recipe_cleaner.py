@@ -67,6 +67,8 @@ def _process_raw_recipe(raw_recipe, ore_dictionary, item_keys=None, translations
         circuit = None
         inputs = []
         for raw_item in input_items:
+            if raw_item is None:
+                continue
             item = _normalize_item(raw_item)
             if isinstance(raw_item, dict) and raw_item.get("nc", False):
                 if _is_circuit(item):

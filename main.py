@@ -189,17 +189,18 @@ def run_clean_recipes(force):
     logger.info("========== 1 清洗与翻译 ==========")
     _ensure_dir(config.CLEANED_RECIPES_DIR)
 
-    # 收集各来源目录里的机器配方文件（GTNEIDefaultHandler_*.json，一机一文件）
+    # 收集 Recipes/ 下所有来源目录里的机器配方文件（GTNEIDefaultHandler_*.json，一机一文件）
+    recipes_root = config.DATA_DIR / "Recipes"
+    if not recipes_root.is_dir():
+        raise FileNotFoundError(f"配方根目录不存在，已停止处理：{recipes_root}")
     source_roots = {
-        source_name: config.DATA_DIR / "Recipes" / source_name
-        for source_name in config.RECIPE_SOURCE_DIRS
+        source_dir.name: source_dir
+        for source_dir in sorted(recipes_root.iterdir())
+        if source_dir.is_dir()
     }
-    missing_roots = [
-        str(path) for path in source_roots.values() if not path.exists()
-    ]
-    if missing_roots:
+    if not source_roots:
         raise FileNotFoundError(
-            "以下来源目录不存在，已停止处理：\n" + "\n".join(missing_roots)
+            f"配方根目录下没有来源目录，已停止处理：{recipes_root}"
         )
 
     if not config.INTERESTED_MACHINES:
@@ -226,7 +227,7 @@ def run_clean_recipes(force):
             "兴趣机器白名单中存在未找到的机器配方文件，已停止处理。\n"
             f"未找到: {missing}\n"
             f"请检查 config.INTERESTED_MACHINES（应为文件名去掉 "
-            f"GTNEIDefaultHandler_ 前缀与 .json 后缀）或 config.RECIPE_SOURCE_DIRS。\n"
+            f"GTNEIDefaultHandler_ 前缀与 .json 后缀）或 DATA_DIR/Recipes 下的来源目录。\n"
             f"可用机器（{len(all_available)} 个），示例: "
             f"{sorted(all_available)[:10]}"
             f"{'...' if len(all_available) > 10 else ''}"
