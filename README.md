@@ -48,6 +48,7 @@ GTNH-Recipe-Check/
 │   └── press.py                  # 冲压机床
 ├── scripts/
 │   ├── split.py                  # 数据准备：Dumper 导出 → Data/<版本>/
+│   ├── group_recipes.py          # 1 阶段等效输入组（独立入口）
 │   ├── nbt_identity.py           # split 用 SNBT 规范化
 │   ├── recipe_association.py     # split 用 NBT / :32767 通配归一化与诊断
 │   └── recipe_roles.py           # split 用 otherItems 角色归类
@@ -117,6 +118,28 @@ python main.py --rebuild   # 强制重算 1 清洗与 2 删减
 
 > 3（冲突图与着色）每次运行都会重算，但**跨次运行只保留最优方案**（图未变时若历史更优则沿用）；1/2 默认复用 `Output/` 中已有产物。聚合文件（`index.json` / `catalyst_reduction.json` / `conflict_graph.json` / `coloring.json`）按机器**合并更新**：剔除本次机器的旧条目后追加新条目，未列入白名单的机器旧产物不受影响。
 
+### 1 阶段等效输入组（实验入口）
+
+`python main.py` 目前仍走旧的 `Core/recipe_cleaner.py`；新的等效输入组合并在独立入口验证：
+
+```bash
+python scripts/group_recipes.py              # INTERESTED_MACHINES 全部
+python scripts/group_recipes.py press        # 指定机器
+```
+
+- 输出：`Output/grouped_recipes/<machine>.json`（顶层为配方列表，与 `cleaned_recipes` 对标）、`index.json`、`orphan_report.json`、`grouping.log`
+- 配方核心字段与 `cleaned_recipes` 一致：`inputItems` / `inputFluids` / `outputItems` / `outputFluids` / `catalystGroups`；新增 `inputGroups`
+- 固定催化剂保持扁平 item；候选催化剂放在 `catalystGroups[].catalystChoices`
+- 输入侧 `#` / `:32767` 先展开成组，每组只包含同类型（item / fluid）
+- 所有输入槽统一为 slot：固定项、组、催化剂；恰好一个 slot 不同且输出相同的配方会迭代合并
+- 报警同时输出到终端和日志，配方带 `alerts` / `needsReview`，不中断
+- 规范化结果只保留输入/输出/催化剂；原始 `eut` / `duration` / `metadata` / `specialValue` / `sourceMod` / `nbtSensitive` 全部丢弃
+- 仅额外保留分析字段 `alerts` / `needsReview` / `orphan`
+- 孤儿只在最终合并后的配方上标记，不删除；只统计输入，不统计输出和催化剂
+- 该产物尚未接入 `main.py` 的 Rules / 冲突检查下游
+
+配方字段：与 cleaned 对齐的 `inputItems` / `inputFluids` / `outputItems` / `outputFluids` / `catalystGroups`；新增 `inputGroups`；`catalystGroups[].catalystChoices` 表示候选催化剂；分析字段 `alerts`、`needsReview`、`orphan`。
+
 ---
 
 ## main.py 参数
@@ -142,6 +165,8 @@ python main.py --rebuild   # 强制重算 1 清洗与 2 删减
 | `CLEANED_RECIPES_DIR` | 1 清洗产物目录 | `Output/cleaned_recipes` |
 | `FILTERED_RECIPES_DIR` | 2 过滤产物目录 | `Output/filtered_recipes` |
 | `COLORED_RECIPES_DIR` | 3 着色产物目录 | `Output/colored_recipes` |
+| `GROUPED_RECIPES_DIR` | 1 阶段等效输入组独立产物目录 | `Output/grouped_recipes` |
+| `GROUP_ORPHAN_MODE` | 孤儿标记偏好：`contains` / `only`（两种 flag 始终记录，不删除配方） | `contains` |
 | `COLORING_ROUNDS` | 冲突图着色每个「单色类最大节点数」档位的随机探索轮数，越大越可能找到更优解 | `128` |
 | `COLOR_CLASS_MAX_SIZE` | 单个颜色类允许的最大节点数；`None` 表示不限制 | `None` |
 | `COLOR_CLASS_SIZE_SWEEP` | 是否按「单色类最大节点数」从小到大多档扫描（每档 `COLORING_ROUNDS` 轮）；各档统一目标函数比较，仍取全局最优 | `True` |
@@ -160,6 +185,7 @@ python main.py --rebuild   # 强制重算 1 清洗与 2 删减
 flowchart LR
     A["Dumper 导出<br/>(DUMPER_DIR)"] -->|scripts/split.py| B["Data/&lt;版本&gt;<br/>Items / OreDictionary / Recipes"]
     B -->|main.py 1| C["cleaned_recipes<br/>清洗 + 等效合并 + 翻译"]
+    B -->|scripts/group_recipes.py| H["grouped_recipes<br/>1 阶段等效输入组"]
     C -->|2 Rules/*.clean| D["规则删减后"]
     D -->|2 reduce_catalyst_groups| E["filtered_recipes<br/>催化组删减"]
     E -->|3.1 build_conflict_graph| F["conflict_graph"]
@@ -182,6 +208,10 @@ flowchart LR
 | `Output/filtered_recipes/empty_group_conflicts.json` | 空催化组（编程电路0）单向串配方**全量**报告（逐对列出 `recipeId` 与输入输出摘要、涉及的两个催化组及其配方数） |
 | `Output/colored_recipes/{machine}.json` | 着色后配方（催化组已替换为合并后的颜色组；组按「组内最小电路编号升序、无电路的组最后」排列） |
 | `Output/colored_recipes/coloring.json` | 着色方案汇总（最优轮次 `best_round`、颜色、节点归属、合并后催化组、各组覆盖配方数降序 `recipe_class_sizes`；`colors` 按输出组序排列） |
+| `Output/grouped_recipes/{machine}.json` | 1 阶段等效输入组结果（`inputGroups` / `catalystGroups` / `alerts` / `orphan`） |
+| `Output/grouped_recipes/index.json` | 分组结果索引与统计 |
+| `Output/grouped_recipes/orphan_report.json` | 各机器孤儿标记汇总 |
+| `Output/grouped_recipes/grouping.log` | 分组报警日志 |
 
 ---
 

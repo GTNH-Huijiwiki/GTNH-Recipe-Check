@@ -38,6 +38,12 @@ EMPTY_CONFLICT_FILE = FILTERED_RECIPES_DIR / "empty_group_conflicts.json"
 # 3 着色产物目录
 COLORED_RECIPES_DIR = OUTPUT_ROOT / "colored_recipes"
 
+# 1 阶段等效输入组产物目录（独立于现有冲突检查下游）
+GROUPED_RECIPES_DIR = OUTPUT_ROOT / "grouped_recipes"
+
+# 孤儿标记偏好：contains | only（两种 flag 始终记录，仅用于下游选择）
+GROUP_ORPHAN_MODE = "contains"
+
 # 冲突图着色探索轮数（每个「单色类最大节点数」档位各跑这么多轮）
 COLORING_ROUNDS = 128
 
