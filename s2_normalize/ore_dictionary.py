@@ -1,7 +1,6 @@
 """展开物品中的矿辞典(#)与通配meta(:32767) key 为具体物品组合。"""
 
 import logging
-import sys
 
 from s2_normalize.virtual_key import (
     name_pair_of,
@@ -34,10 +33,11 @@ def _warn_wildcard_too_many(key, members):
     if key in _WILDCARD_WARNED:
         return
     _WILDCARD_WARNED.add(key)
-    print(
-        f"[警告] 通配 {key} 匹配到 {len(members)} 个具体物品（>{_WILDCARD_LIMIT}），"
-        f"将全部展开；如非预期请检查物品注册表。",
-        file=sys.stderr,
+    logger.warning(
+        "通配 %s 匹配到 %d 个具体物品（>%d），将全部展开；如非预期请检查物品注册表。",
+        key,
+        len(members),
+        _WILDCARD_LIMIT,
     )
 
 

@@ -1,15 +1,14 @@
-"""Canonical catalyst-group data model.
+"""催化组规范数据模型。
 
-A recipe owns a list of catalyst alternatives::
+一条配方拥有若干催化条件：
 
     "catalystGroups": [
         {"catalysts": [...], "circuit": {...} | null},
         ...
     ]
 
-The list may be empty.  Empty groups are not stored: zero groups is the
-single representation of an unconditional recipe.  Within one group the
-catalysts are required together (AND); separate groups are OR alternatives.
+列表可以为空。空组不会保存，零个催化组是无条件配方的唯一表示。
+同一个组内的催化剂同时满足，即 AND；不同组之间是 OR 候选。
 """
 
 from __future__ import annotations
@@ -47,7 +46,7 @@ def _canonical_group(group):
 
 
 def group_signature(group):
-    """Canonical identity: sorted catalyst keys + circuit key."""
+    """规范身份：排序后的催化剂 key 与电路 key。"""
 
     catalysts = tuple(sorted(item.get("key", "") for item in group.get("catalysts", [])))
     circuit = group.get("circuit") or {}
@@ -55,7 +54,7 @@ def group_signature(group):
 
 
 def concrete_catalyst_groups(group):
-    """Expand one group's catalystChoices into concrete canonical groups."""
+    """把单个组的 catalystChoices 展开为具体规范组。"""
 
     fixed = list(group.get("catalysts", []) or [])
     choice_slots = []
@@ -86,7 +85,7 @@ def concrete_catalyst_groups(group):
 
 
 def normalize_catalyst_groups(groups):
-    """Expand choices, remove empty groups and deduplicate alternatives."""
+    """展开候选项、移除空组并对催化组去重。"""
 
     normalized = []
     seen = set()
@@ -101,7 +100,7 @@ def normalize_catalyst_groups(groups):
 
 
 def normalize_recipe_catalyst_groups(recipe):
-    """Return a copy with only canonical catalystGroups."""
+    """返回只包含规范 catalystGroups 的配方副本。"""
 
     result = deepcopy(recipe)
     result["catalystGroups"] = normalize_catalyst_groups(
@@ -111,10 +110,10 @@ def normalize_recipe_catalyst_groups(recipe):
 
 
 def effective_analysis_groups(recipe):
-    """Groups used by graph analysis.
+    """图分析使用的催化组。
 
-    A zero-group recipe is unconditional for conflict analysis and maps to one
-    virtual empty group.  The recipe itself is never mutated.
+    零催化组配方在冲突分析中视为无条件配方，并映射为一个虚拟空组。
+    配方自身不会被修改。
     """
 
     groups = recipe.get("catalystGroups", [])

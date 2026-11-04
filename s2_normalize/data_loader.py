@@ -4,6 +4,8 @@ import json
 import logging
 from pathlib import Path
 
+from s2_normalize.text import clean_display_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,7 +37,7 @@ def load_machine_recipes(recipe_file: Path):
         return None
 
     original_name = recipe_file.stem[len(prefix):]
-    return original_name, data.get("name", ""), recipes
+    return original_name, clean_display_text(data.get("name", "")), recipes
 
 
 def load_item_translations(data_dir: Path) -> dict:
@@ -52,10 +54,13 @@ def load_item_translations(data_dir: Path) -> dict:
             if not isinstance(item, dict) or not item.get("key"):
                 continue
             key = item["key"]
+            original_name = clean_display_text(item.get("originalName", key)) or key
+            translated_name = (
+                clean_display_text(item.get("translatedName", "")) or original_name
+            )
             translations[key] = {
-                "originalName": item.get("originalName", key),
-                "translatedName": item.get("translatedName")
-                or item.get("originalName", key),
+                "originalName": original_name,
+                "translatedName": translated_name,
             }
     return translations
 

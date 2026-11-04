@@ -1,648 +1,533 @@
-"""
-split.py
-数据准备脚本：从 GTNH Dumper 导出生成 Items / OreDictionary / Recipes 三类数据。
+﻿"""本项目使用的 Wiki Toolchain 第一步预处理。
 
-本脚本从 databaseDump/split_all.py 中抽出「生成 Items、OreDictionary、Recipes 数据」
-的功能子集，去掉上传 / 图标 / Gtmaterial / Ticmaterial / Aspects / Index / Ores 等
-无关功能，输出到 config.py 指定的 split 输出目录。
-
-数据源与输出目录均取自项目根 config.py：
-    DUMPER_DIR     待处理导出数据（advitempanel.json / fluid.json / oreDictionary.json / recipes/）
-    DATA_SPLIT_DIR 处理后的输出目录（即本仓库其它模块的 DATA_DIR）
-
-输出结构（DATA_SPLIT_DIR）：
-    Items.json              (advitempanel.json -> 单文件，每条仅 key/originalName/translatedName)
-    OreDictionary.json      (oreDictionary.json -> 单文件，{oreDict: items})
-    Recipes/                (recipes/**/*.json -> 单文件 Recipes/<mod>/<handler>.json + NBT 键修正)
-    nbt_regress_cache.json  (NBT 退行缓存，中间产物)
-    nbt_missing.csv         (Recipes NBT 未匹配清单，中间产物，仅缺失时生成)
-
-用法（在仓库根目录运行）：
-    python -m s1_preprocess.split                # items + oredict + recipes（同一进程内依次执行）
-    python -m s1_preprocess.split items          # 仅 Items
-    python -m s1_preprocess.split oredict        # 仅 OreDictionary
-    python -m s1_preprocess.split recipes        # 仅 Recipes（独立运行无法做 NBT key 解析，见下）
-    python -m s1_preprocess.split items recipes  # 多个子步骤（items 必须先于 recipes）
-
-Items 落盘只保留 key/originalName/translatedName；Recipes 的 NBT key 解析依赖完整
-item 信息（rawKey/nbt），因此只有同一进程内先执行过 items 时才可解析。
+下列数据变换对齐 GTNH-Chinese-Wiki-Toolchain/databaseDump/split_all.py
+的提交 8a94345a530fb1d843edaf814b253207bc74ac27。Wiki 页面生成、图片与
+tooltip 处理以及本项目不消费的数据域均不在此实现。
 """
 
-import glob
+from __future__ import annotations
+
 import json
+import logging
 import os
 import re
-import sys
 
-# 让进度输出实时刷新
-sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, "reconfigure") else None
+from s1_preprocess.recipe_association import RecipeAssociations
+from s1_preprocess.recipe_roles import normalize_recipe_roles
 
-# 无论以脚本方式还是 `python -m s1_preprocess.split` 运行，都保证能 import 到仓库根的 config.py。
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
-if SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, SCRIPT_DIR)
+logger = logging.getLogger(__name__)
 
-import config  # noqa: E402  —— 项目根目录集中配置
-from s1_preprocess.recipe_association import RecipeAssociations  # noqa: E402
-from s1_preprocess.recipe_roles import normalize_recipe_roles  # noqa: E402
-
-_FORMAT_CODE_RE = re.compile(r"§.")
+_CHARGEABLE_TOOL_PREFIXES = {
+    "IC2:",
+    "GraviSuite:",
+    "AdvancedSolarPanel:",
+    "EMT:",
+}
 
 
-def _clean_text(value):
-    """去掉 Minecraft 格式码并压缩首尾空白；落盘前才对小体量三列数据执行。"""
-    return _FORMAT_CODE_RE.sub("", str(value or "")).strip()
-
-
-DUMPER_DIR = str(config.DUMPER_DIR)          # split 的输入：导出数据
-DATA_SPLIT_DIR = str(config.DATA_SPLIT_DIR)  # split 的输出：本仓库其它模块的数据根目录
-
-def _load_nbt_regress_cache():
-    """加载 NBT 退行缓存（位于最终结果文件夹）。返回 (regress_set, keep_set)。"""
-    cache_path = os.path.join(DATA_SPLIT_DIR, "nbt_regress_cache.json")
+def _load_nbt_regress_cache(output_dir):
+    cache_path = os.path.join(output_dir, "nbt_regress_cache.json")
     if not os.path.exists(cache_path):
         return set(), set()
     try:
-        with open(cache_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with open(cache_path, "r", encoding="utf-8") as stream:
+            data = json.load(stream)
         return set(data.get("regress", [])), set(data.get("keep", []))
     except Exception:
         return set(), set()
 
 
-def _save_nbt_regress_cache(regress_set, keep_set):
-    """保存 NBT 退行缓存（位于最终结果文件夹）。"""
-    cache_path = os.path.join(DATA_SPLIT_DIR, "nbt_regress_cache.json")
+def _save_nbt_regress_cache(output_dir, regress_set, keep_set):
+    cache_path = os.path.join(output_dir, "nbt_regress_cache.json")
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump({"regress": sorted(regress_set), "keep": sorted(keep_set)}, f, ensure_ascii=False, indent=2)
+    with open(cache_path, "w", encoding="utf-8") as stream:
+        json.dump(
+            {"regress": sorted(regress_set), "keep": sorted(keep_set)},
+            stream,
+            ensure_ascii=False,
+            indent=2,
+        )
 
-
-# IC2 充电工具前缀：:1 是没电，:26/:27 是满电。复制 :1 为裸 key。
-_CHARGEABLE_TOOL_PREFIXES = {
-    "IC2:", "GraviSuite:", "AdvancedSolarPanel:", "EMT:",
-}
 
 def _fix_ic2_chargeable_tools(items: list):
-    """充电工具：:1=没电，:26/:27=满电。
-    复制 :1 变体为去 meta 的裸 key 版本，插入在原条目旁边。"""
+    """将 IC2 系列 :1 充电状态变体复制为裸 key。"""
     inserted = 0
-    existing = {
-        value
-        for item in items
-        for value in (item.get("key"), item.get("shortKey"))
-        if value
-    }
+    existing_keys = {item.get("key") for item in items}
     i = 0
     while i < len(items):
         item = items[i]
-        rk = item.get("key", "")  # 此时尚未 rename，key 即原始含 meta 的 key
-        if not rk.endswith(":1"):
+        raw_key = item.get("key", "")
+        if not raw_key.endswith(":1"):
             i += 1
             continue
-        base_key = rk[:-2]  # 去掉 :1
-        # 检查是否在充电工具前缀列表中
-        is_chargeable = False
-        for prefix in _CHARGEABLE_TOOL_PREFIXES:
-            if base_key.startswith(prefix):
-                is_chargeable = True
-                break
-        if not is_chargeable:
+        base_key = raw_key[:-2]
+        if base_key in existing_keys:
             i += 1
             continue
-        # 向前后找 :26 或 :27 变体
+        if not any(base_key.startswith(prefix) for prefix in _CHARGEABLE_TOOL_PREFIXES):
+            i += 1
+            continue
         has_charged = False
-        for j in (i - 1, i + 1):
-            if 0 <= j < len(items):
-                nk = items[j].get("key", "")
-                if nk == base_key + ":26" or nk == base_key + ":27":
+        for index in (i - 1, i + 1):
+            if 0 <= index < len(items):
+                nearby = items[index].get("key", "")
+                if nearby in (base_key + ":26", base_key + ":27"):
                     has_charged = True
                     break
-        if has_charged:
-            # 新导出已自带裸 key 时不再重复注入
-            if base_key in existing:
-                i += 1
-                continue
-            # 复制 :1 条目，去掉 meta
-            copy_item = dict(item)
-            copy_item["key"] = base_key
-            copy_item["shortKey"] = base_key
-            items.insert(i + 1, copy_item)
-            existing.add(base_key)
-            inserted += 1
-            i += 2  # 跳过插入的条目
-        else:
+        if not has_charged:
             i += 1
+            continue
+        copy_item = dict(item)
+        copy_item["key"] = base_key
+        copy_item["shortKey"] = base_key
+        items.insert(i + 1, copy_item)
+        existing_keys.add(base_key)
+        inserted += 1
+        i += 2
     if inserted:
-        print(f"  [IC2Tools] Inserted {inserted} bare-key copies for IC2 chargeable tools")
+        logger.debug("[IC2 工具] 插入 %d 个裸 key 副本", inserted)
 
 
 def _fix_aspectrecipeindex_keys(items: list):
-    """修正 aspectrecipeindex:aspect 物品的 key：用 originalName 替换无意义的 NBT hash。
-    aspectrecipeindex:aspect_85gjJ462zA0lgsJ → aspectrecipeindex:aspect_Terra"""
     fixed = 0
     for item in items:
-        if item.get("rawKey") == "aspectrecipeindex:aspect":
-            oname = _clean_text(item.get("originalName", ""))
-            if oname:
-                new_key = f"aspectrecipeindex:aspect_{oname}"
-                if item.get("key") != new_key:
-                    item["key"] = new_key
-                    fixed += 1
+        if item.get("rawKey") != "aspectrecipeindex:aspect":
+            continue
+        original_name = item.get("originalName", "")
+        if not original_name:
+            continue
+        new_key = f"aspectrecipeindex:aspect_{original_name}"
+        if item.get("key") != new_key:
+            item["key"] = new_key
+            fixed += 1
     if fixed:
-        print(f"  [AspectRecipeIndex] Fixed {fixed} keys (NBT hash → originalName)")
+        logger.debug("[AspectRecipeIndex] 修正 %d 个 key", fixed)
 
 
-def _regress_nbt_only_items(items: list):
-    """退行机制：对于 rawKey 唯一的 item（只有一个 NBT 变体），
-    如果其 key（带 NBT 后缀）从未在 recipe 中出现过，则退行 key → rawKey。
+def _regress_nbt_only_items(items: list, source_dir, output_dir):
+    recipes_dir = os.path.join(source_dir, "recipes")
 
-    前提：rawKey 相同的 item 总是连续排列。
-    使用 nbt_regress_cache.json 缓存已确认的结果，避免重复扫描 recipe。
-    """
-    recipes_dir = os.path.join(DUMPER_DIR, "recipes")
-
-    # Step 0: 空 NBT (nbt: "{}") 对应的固定 hash 后缀 _gLuB0gegBqh1aRe，直接退行
-    EMPTY_NBT_SUFFIX = "_gLuB0gegBqh1aRe"
+    empty_nbt_suffix = "_gLuB0gegBqh1aRe"
     empty_nbt_regressed = 0
+    existing_keys = {item.get("key") for item in items}
     for item in items:
-        k = item.get("key", "")
-        rk = item.get("rawKey", "")
-        if k and rk and k.endswith(EMPTY_NBT_SUFFIX) and k != rk:
-            item["key"] = rk
+        key = item.get("key", "")
+        raw_key = item.get("rawKey", "")
+        if (
+            key
+            and raw_key
+            and key.endswith(empty_nbt_suffix)
+            and key != raw_key
+            and raw_key not in existing_keys
+        ):
+            item["key"] = raw_key
             empty_nbt_regressed += 1
     if empty_nbt_regressed:
-        print(f"  [NBT regress] Stripped empty-NBT suffix ({EMPTY_NBT_SUFFIX}) from {empty_nbt_regressed} items")
+        logger.debug(
+            "[NBT 退行] 从 %d 条物品中移除空 NBT 后缀 %s",
+            empty_nbt_regressed,
+            empty_nbt_suffix,
+        )
 
-    # Step 1: 用全量计数找出 rawKey 唯一的 NBT 单例。
-    # 新导出的条目不再按 rawKey 连续排列，不能依赖相邻分组。
-    raw_counts = {}
+    raw_key_counts = {}
     for item in items:
-        raw = item.get("rawKey", "")
-        if raw:
-            raw_counts[raw] = raw_counts.get(raw, 0) + 1
+        raw_key = item.get("rawKey", "")
+        raw_key_counts[raw_key] = raw_key_counts.get(raw_key, 0) + 1
 
-    nbt_keys_to_check = {}   # key → index in items
-    for idx, item in enumerate(items):
-        rk = item.get("rawKey", "")
-        k = item.get("key", "")
-        if rk and k and k != rk and raw_counts.get(rk) == 1:
-            nbt_keys_to_check[k] = idx
+    nbt_keys_to_check = {}
+    for index, item in enumerate(items):
+        raw_key = item.get("rawKey", "")
+        key = item.get("key", "")
+        if raw_key_counts[raw_key] == 1 and key and raw_key and key != raw_key:
+            nbt_keys_to_check[key] = index
 
     if not nbt_keys_to_check:
-        print("  [NBT regress] No NBT-singleton items to check.")
+        logger.debug("[NBT 退行] 没有需要检查的 NBT 单例物品")
         return
 
-    # Step 2: 加载缓存，分流
-    cache_regress, cache_keep = _load_nbt_regress_cache()
+    cache_regress, cache_keep = _load_nbt_regress_cache(output_dir)
     cache_hits = 0
     regressed_from_cache = 0
-    keys_to_scan = {}  # key → index (not in cache)
+    keys_to_scan = {}
 
-    for k, idx in nbt_keys_to_check.items():
-        if k in cache_regress:
-            # 缓存确认：recipe 中未出现 → 直接退行
-            items[idx]["key"] = items[idx]["rawKey"]
+    for key, index in nbt_keys_to_check.items():
+        if key in cache_regress:
+            items[index]["key"] = items[index]["rawKey"]
             regressed_from_cache += 1
             cache_hits += 1
-        elif k in cache_keep:
-            # 缓存确认：recipe 中出现过 → 跳过
+        elif key in cache_keep:
             cache_hits += 1
         else:
-            keys_to_scan[k] = idx
+            keys_to_scan[key] = index
 
     if regressed_from_cache:
-        print(f"  [NBT regress] {regressed_from_cache} keys regressed from cache")
+        logger.debug("[NBT 退行] 根据缓存退行 %d 个 key", regressed_from_cache)
     if cache_hits:
-        print(f"  [NBT regress] {cache_hits} keys resolved from cache, {len(keys_to_scan)} new keys need scanning")
-
+        logger.debug(
+            "[NBT 退行] 缓存命中 %d 个 key，剩余 %d 个 key 需要扫描",
+            cache_hits,
+            len(keys_to_scan),
+        )
     if not keys_to_scan:
         return
 
     if not os.path.isdir(recipes_dir):
-        print("  [NBT regress] recipes 目录不存在，跳过剩余 {len(keys_to_scan)} 个 key 的扫描")
+        logger.warning(
+            "[NBT 退行] recipes 目录不存在，跳过 %d 个 key 的扫描",
+            len(keys_to_scan),
+        )
         return
 
-    # Step 3: 扫描 recipe 文件，纯字符串匹配（仅对新 key）
-    print(f"  [NBT regress] Scanning recipes for {len(keys_to_scan)} new keys...")
-    unmatched = set(keys_to_scan.keys())
+    logger.debug("[NBT 退行] 扫描配方以检查 %d 个新 key", len(keys_to_scan))
+    unmatched = set(keys_to_scan)
     recipe_files = []
-    for root, dirs, files in os.walk(recipes_dir):
-        for fn in files:
-            if fn.endswith(".json"):
-                recipe_files.append(os.path.join(root, fn))
+    for root, _dirs, files in os.walk(recipes_dir):
+        for filename in files:
+            if filename.endswith(".json"):
+                recipe_files.append(os.path.join(root, filename))
     string_re = re.compile(r'"((?:\\.|[^"\\])*)"')
-    for rpath in recipe_files:
+    for recipe_path in recipe_files:
         if not unmatched:
             break
-        with open(rpath, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-        # 一次提取文件内所有 JSON 字符串，避免对每个候选 key 做整文件子串扫描
+        with open(recipe_path, "r", encoding="utf-8", errors="replace") as stream:
+            content = stream.read()
         unmatched -= set(string_re.findall(content))
 
-    # 更新缓存：未匹配到的 → regress，匹配到的 → keep
     new_regress = unmatched
-    new_keep = set(keys_to_scan.keys()) - unmatched
+    new_keep = set(keys_to_scan) - unmatched
     cache_regress.update(new_regress)
     cache_keep.update(new_keep)
-    _save_nbt_regress_cache(cache_regress, cache_keep)
-    print(f"  [NBT regress] Cache updated: +{len(new_regress)} regress, +{len(new_keep)} keep")
+    _save_nbt_regress_cache(output_dir, cache_regress, cache_keep)
+    logger.debug(
+        "[NBT 退行] 缓存更新：新增退行 %d 个，保留 %d 个",
+        len(new_regress),
+        len(new_keep),
+    )
 
-    # Step 4: 对未匹配到的 key，退行 key → rawKey
     regressed = 0
-    for k in new_regress:
-        idx = keys_to_scan[k]
-        item = items[idx]
-        if item.get("key") == k and item.get("rawKey"):
+    for key in new_regress:
+        index = keys_to_scan[key]
+        item = items[index]
+        if item.get("key") == key and item.get("rawKey"):
             item["key"] = item["rawKey"]
             regressed += 1
-
     total_regressed = regressed_from_cache + regressed
-    print(f"  [NBT regress] Regressed {regressed} items from scan ({total_regressed} total: key → rawKey, NBT suffix stripped).")
+    logger.debug(
+        "[NBT 退行] 扫描后退行 %d 条物品，共退行 %d 条",
+        regressed,
+        total_regressed,
+    )
 
-
-# ============================================================
-# Custom item injection
-# ============================================================
 
 def _inject_custom_items(items: list):
-    """注入导出可能缺失的自定义条目（如编程电路各配置变体）。"""
-    n = len(items)
-    existing = {
-        value
-        for item in items
-        for value in (item.get("key"), item.get("shortKey"))
-        if value
-    }
-
-    # 编程电路 (gregtech:gt.integrated_circuit) — 配置 1~24
-    for i in range(1, 25):
-        key = f"gregtech:gt.integrated_circuit:{i}"
-        if key in existing:
-            continue
-        items.append({
-            "shortKey": key,
-            "key": key,
-            "originalName": "Programmed Circuit",
-            "translatedName": f"编程电路{i}",
-        })
-        existing.add(key)
-
-    print(f"  Injected {len(items) - n} custom items")
+    """按 Wiki Toolchain 原样注入自定义物品变体。"""
+    start = len(items)
+    for index in range(1, 25):
+        items.append(
+            {
+                "shortKey": f"gregtech:gt.integrated_circuit:{index}",
+                "key": f"gregtech:gt.integrated_circuit:{index}",
+                "originalName": "Programmed Circuit",
+                "translatedName": f"编程电路{index}",
+                "tooltips": (
+                    f"编程电路<br>配置== {index}<br>右键以重新配置"
+                    f"<br>需要螺丝刀或编程工具"
+                ),
+                "mod": "GregTech",
+                "iconName": f"icon_gregtech_gt.integrated_circuit_{index}.png",
+                "size": 16,
+                "frameCount": 1,
+            }
+        )
+    logger.debug("[自定义物品] 注入 %d 条，物品总数 %d -> %d", len(items) - start, start, len(items))
 
 
-# ============================================================
-# Items
-# ============================================================
-
-# 完整 items（含 rawKey/nbt/key），供同进程内 Recipes 的 NBT key 解析使用；
-# 落盘时只投影为 key/originalName/translatedName 三列。
-_FULL_ITEMS = None
-
-
-def _load_fluid_key_map():
-    """加载 fluid.json，构建 {gtDisplayKey: fluid.key} 映射（仅用于改写流体 key）。"""
-    path = os.path.join(DUMPER_DIR, "fluid.json")
-    print(f"  Loading {os.path.basename(path)} ({os.path.getsize(path) / 1024 / 1024:.1f} MB)...")
-    data = json.load(open(path, "r", encoding="utf-8"))
-    fluid_keys = {}
+def _load_fluid_map(source_dir):
+    path = os.path.join(source_dir, "fluid.json")
+    logger.debug("加载流体数据：%s（%.1f MB）", path, os.path.getsize(path) / 1024 / 1024)
+    with open(path, "r", encoding="utf-8") as stream:
+        data = json.load(stream)
+    fluid_map = {}
     for entry in data["fluids"]:
-        gtk = entry.get("gtDisplayKey", "")
-        if gtk:
-            fluid_keys[gtk] = entry.get("key", "")
+        display_key = entry.get("gtDisplayKey", "")
+        if display_key:
+            fluid_map[display_key] = entry
     del data
-    print(f"  Fluid key map: {len(fluid_keys):,} entries")
-    return fluid_keys
+    logger.debug("流体映射条目：%d", len(fluid_map))
+    return fluid_map
 
 
-def _rewrite_fluid_keys(items: list, fluid_keys: dict):
-    """将流体 item 的 shortKey/key 改写为 fluid.key。
-    流体 item 的 originalName/translatedName 已自带且与 fluid 相同，无需合并其它字段。"""
-    rewritten = 0
+def _merge_fluid_data(items: list, fluid_map: dict):
+    """按 Wiki 预处理规则合并流体 key 与字段。"""
+    fluid_matched = set()
+    merged = 0
     for item in items:
-        fluid_key = fluid_keys.get(item.get("key", ""))
-        if fluid_key is None:
+        item_key = item.get("key", "")
+        fluid = fluid_map.get(item_key)
+        if fluid is None:
             continue
+        fluid_key = fluid.get("key", "")
         item["shortKey"] = fluid_key
         item["key"] = fluid_key
-        rewritten += 1
-    print(f"  Fluid keys rewritten: {rewritten} items")
+        skip_fields = {"key", "gtDisplayKey"}
+        for field, value in fluid.items():
+            if field in skip_fields or field in item:
+                continue
+            if value is not None:
+                item[field] = value
+        fluid_matched.add(item_key)
+        merged += 1
 
-
-def _dedupe_items(items: list) -> list:
-    """按最终 key 去重；新导出自带条目与旧注入逻辑可能产生同 key。"""
-    seen = set()
-    unique = []
-    dropped = 0
-    for item in items:
-        key = item.get("key", "")
-        if key in seen:
-            dropped += 1
-            continue
-        seen.add(key)
-        unique.append(item)
-    if dropped:
-        print(f"  [Items] Dropped {dropped} duplicate key(s)")
-    return unique
+    unmatched = [key for key in fluid_map if key not in fluid_matched]
+    if unmatched:
+        logger.warning("%d 个流体未匹配任何物品", len(unmatched))
+        for display_key in unmatched[:10]:
+            fluid = fluid_map[display_key]
+            logger.warning(
+                "未匹配流体：gtDisplayKey=%s，fluid.key=%s",
+                display_key,
+                fluid.get("key", "?"),
+            )
+    logger.debug("合并流体数据：%d 条物品", merged)
 
 
 def _project_item(item: dict) -> dict:
-    """Items 落盘只保留三列，并在裁剪后去除格式码。"""
     return {
         "key": item.get("key", ""),
-        "originalName": _clean_text(item.get("originalName", "")),
-        "translatedName": _clean_text(item.get("translatedName", "")),
+        "originalName": item.get("originalName", ""),
+        "translatedName": item.get("translatedName", ""),
     }
 
 
-def _write_items_json(items: list, out_path: str):
-    """items 投影为 {key, originalName, translatedName} 后整体写入单个 Items.json。"""
-    entries = [_project_item(it) for it in items]
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    payload = {"items": entries}
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    size = os.path.getsize(out_path)
-    print(f"  -> {os.path.basename(out_path)}: {len(entries):,} entries, {size / 1024:.1f} KB\n")
+def _write_items_json(items: list, output_dir):
+    entries = [_project_item(item) for item in items]
+    path = os.path.join(output_dir, "Items.json")
+    os.makedirs(output_dir, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as stream:
+        json.dump({"items": entries}, stream, ensure_ascii=False, indent=2)
+    size = os.path.getsize(path)
+    logger.debug("写入 Items.json：%d 条，%.1f KB", len(entries), size / 1024)
 
 
-def do_items():
-    """Split advitempanel.json -> Items.json（仅保留 key/originalName/translatedName 三列）"""
-    global _FULL_ITEMS
-    print("\n[Items]")
-    path = os.path.join(DUMPER_DIR, "advitempanel.json")
+def run_items(source_dir, output_dir):
+    """预处理 advitempanel.json，并返回含完整身份字段的内存物品记录。"""
+    logger.debug("开始处理 Items")
+    path = os.path.join(source_dir, "advitempanel.json")
     size_mb = os.path.getsize(path) / 1024 / 1024
-    print(f"  Loading {os.path.basename(path)} ({size_mb:.1f} MB)...")
-    data = json.load(open(path, "r", encoding="utf-8"))
+    logger.debug("加载 %s（%.1f MB）", os.path.basename(path), size_mb)
+    with open(path, "r", encoding="utf-8") as stream:
+        data = json.load(stream)
     items = data["shortKey"]
-    print(f"  Total: {len(items):,} items")
+    logger.debug("原始物品条目：%d", len(items))
     del data
 
-    # ① 流体：改写 key（GregTech_FluidDisplay:<id> -> fluid.key）。
-    #    名字字段 item 已自带且与 fluid 相同，无需加载图标或合并其它字段。
-    fluid_keys = _load_fluid_key_map()
-    _rewrite_fluid_keys(items, fluid_keys)
-
-    # ② 注入自定义条目（编程电路 1~24，与现有 wiki 页面对齐）
+    fluid_map = _load_fluid_map(source_dir)
+    _merge_fluid_data(items, fluid_map)
     _inject_custom_items(items)
-
-    # ③ IC2 充电工具：:1 变体复制为去 meta 裸 key
     _fix_ic2_chargeable_tools(items)
 
-    # ④ key/shortKey 对调（key = 原 shortKey）
     for item in items:
-        sk = item.pop("shortKey", None)
-        k = item.get("key")
-        if sk and k:
-            item["rawKey"] = k
-            item["key"] = sk
-        elif sk:
-            item["key"] = sk
+        short_key = item.pop("shortKey", None)
+        key = item.get("key")
+        if short_key and key:
+            item["rawKey"] = key
+            item["key"] = short_key
+        elif short_key:
+            item["key"] = short_key
 
-    # ⑤ 修正 aspectrecipeindex:aspect 的 key：用 originalName 替换无意义的 NBT hash
     _fix_aspectrecipeindex_keys(items)
-
-    # ⑥ 退行：唯一 NBT 变体且 recipe 中未引用 → key 退行为 rawKey
-    _regress_nbt_only_items(items)
-
-    # ⑦ 去重：新导出自带条目与旧注入逻辑可能产生同一最终 key
-    items = _dedupe_items(items)
-
-    # 记录完整数据（含 rawKey/nbt）供同进程内 Recipes 的 NBT key 解析
-    _FULL_ITEMS = items
-
-    # ⑧ 写入：只保留 key/originalName/translatedName，单文件 Items.json
-    _write_items_json(items, os.path.join(DATA_SPLIT_DIR, "Items.json"))
+    _regress_nbt_only_items(items, source_dir, output_dir)
+    _write_items_json(items, output_dir)
+    return items
 
 
-# ============================================================
-# OreDictionary
-# ============================================================
+def _index_wildcard_item(item, wildcard_index):
+    raw = item.get("rawKey") or item.get("key", "")
+    key = item.get("key", "")
+    if not raw or not key or raw.endswith(":32767"):
+        return
+    base = (
+        raw.rsplit(":", 1)[0]
+        if raw.count(":") >= 2 and raw.rsplit(":", 1)[1].isdigit()
+        else raw
+    )
+    wildcard_index.setdefault(base, set()).add(key)
 
-def _wildcard_base(raw):
-    """通配 key 的注册名：去掉末尾数字 meta。"""
-    if raw.count(":") >= 2 and raw.rsplit(":", 1)[1].isdigit():
-        return raw.rsplit(":", 1)[0]
-    return raw
 
-
-def _normalize_ore_dictionary(flat, items):
-    """按真实物品变体展开矿辞通配，并报告未解析/缺失。"""
+def normalize_ore_dictionary(entries, items):
+    """按 Wiki 预处理规则发布矿辞成员。"""
     wildcard_index = {}
     item_keys = set()
     for item in items:
-        raw = item.get("rawKey") or item.get("key", "")
-        key = item.get("key", "")
-        if not raw or not key or raw.endswith(":32767"):
-            continue
-        wildcard_index.setdefault(_wildcard_base(raw), set()).add(key)
-        item_keys.add(key)
+        _index_wildcard_item(item, wildcard_index)
+        item_keys.add(item["key"])
 
-    normalized = {}
+    flat = {}
     unresolved = []
     missing_exact = []
     expanded = 0
-    for ore_name, members in flat.items():
-        out = []
+    for entry in entries:
+        members = []
         seen = set()
-        for key in members:
+        for key in entry["items"]:
             if key.endswith(":32767"):
                 candidates = sorted(wildcard_index.get(key[:-6], ()))
                 expanded += 1
                 if not candidates:
-                    unresolved.append({"oreDict": ore_name, "key": key})
-                    continue
+                    unresolved.append({"oreDict": entry["oreDict"], "key": key})
             else:
                 candidates = [key]
                 if key not in item_keys:
-                    missing_exact.append({"oreDict": ore_name, "key": key})
+                    missing_exact.append({"oreDict": entry["oreDict"], "key": key})
             for candidate in candidates:
                 if candidate not in seen:
                     seen.add(candidate)
-                    out.append(candidate)
-        normalized[ore_name] = out
-    return normalized, unresolved, missing_exact, expanded
+                    members.append(candidate)
+        flat[entry["oreDict"]] = members
+    return flat, {
+        "expandedWildcardMembers": expanded,
+        "unresolvedWildcardMembers": unresolved,
+        "missingExactMembers": missing_exact,
+    }
 
 
-def do_oredictionary():
-    """oreDictionary.json -> OreDictionary.json（单文件 {oreDict: items}，无更深结构）"""
-    print("\n[OreDictionary]")
-    path = os.path.join(DUMPER_DIR, "oreDictionary.json")
+def run_oredictionary(source_dir, output_dir, items):
+    logger.debug("开始处理 OreDictionary")
+    path = os.path.join(source_dir, "oreDictionary.json")
     size_mb = os.path.getsize(path) / 1024 / 1024
-    print(f"  Loading {os.path.basename(path)} ({size_mb:.1f} MB)...")
-    data = json.load(open(path, "r", encoding="utf-8"))
+    logger.debug("加载 %s（%.1f MB）", os.path.basename(path), size_mb)
+    with open(path, "r", encoding="utf-8") as stream:
+        data = json.load(stream)
     entries = data["oreDictionaries"]
     del data
 
-    # 单文件扁平对象 {oreDict_name: items_array}
-    flat: dict[str, list] = {}
-    for entry in entries:
-        flat[entry["oreDict"]] = entry["items"]
-    print(f"  Total: {len(flat):,} oreDict keys")
+    flat, report = normalize_ore_dictionary(entries, items)
+    os.makedirs(output_dir, exist_ok=True)
+    report_path = os.path.join(output_dir, "oredictionary_associations.json")
+    with open(report_path, "w", encoding="utf-8") as stream:
+        json.dump(report, stream, ensure_ascii=False, indent=2)
+    logger.debug(
+        "矿辞通配展开：%d 个；无导出候选：%d 个",
+        report["expandedWildcardMembers"],
+        len(report["unresolvedWildcardMembers"]),
+    )
 
-    if _FULL_ITEMS is not None:
-        flat, unresolved, missing_exact, expanded = _normalize_ore_dictionary(
-            flat, _FULL_ITEMS
-        )
-        print(
-            f"  Wildcards expanded: {expanded:,}; "
-            f"unresolved: {len(unresolved)}, missing exact: {len(missing_exact)}"
-        )
-        report = {
-            "unresolved_wildcards": unresolved,
-            "missing_exact_keys": missing_exact,
-        }
-        report_path = os.path.join(DATA_SPLIT_DIR, "oredictionary_associations.json")
-        with open(report_path, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
-        print(f"  OreDictionary association report: {report_path}")
-    else:
-        print("  [OreDictionary] Items 未加载，跳过通配/缺失检查")
-
-    out_path = os.path.join(DATA_SPLIT_DIR, "OreDictionary.json")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(flat, f, ensure_ascii=False, indent=2)
+    out_path = os.path.join(output_dir, "OreDictionary.json")
+    with open(out_path, "w", encoding="utf-8") as stream:
+        json.dump(flat, stream, ensure_ascii=False, indent=2)
     size = os.path.getsize(out_path)
-    print(f"  -> OreDictionary.json: {len(flat):,} keys, {size / 1024:.1f} KB\n")
+    logger.debug(
+        "写入 OreDictionary.json：%d 个 key，%.1f KB",
+        len(flat),
+        size / 1024,
+    )
+    return report, len(flat)
 
-
-# ============================================================
-# Recipes
-# ============================================================
 
 def _fix_recipe_format(recipes: list, filepath: str) -> list:
-    """修正非标准 NEI recipe 格式为标准格式。
-    如果配方已经是标准格式（有 outputFluids / inputFluids / outputItems），
-    则跳过，避免未来数据已标准化时重复破坏。"""
     fixed = []
-    for r in recipes:
-        r = dict(r)
-
-        # 已经是标准格式 → 不改
-        if any(k in r for k in ("outputFluids", "inputFluids", "outputItems", "inputItems")):
-            fixed.append(r)
+    for recipe in recipes:
+        recipe = dict(recipe)
+        if any(
+            key in recipe
+            for key in ("outputFluids", "inputFluids", "outputItems", "inputItems")
+        ):
+            fixed.append(recipe)
             continue
 
         if "GasSiphonRecipeHandler" in filepath:
-            # 旧格式：{fluid, planet, depth, outputAmount}
-            # → 新格式：{outputFluids, eut, duration, metadata}
-            fluid_key = r.pop("fluid", {}).get("key", "")
-            amount = r.pop("outputAmount", 0)
-            r["outputFluids"] = [{"key": fluid_key, "amount": amount}]
-            r["eut"] = 0
-            r["duration"] = 0
-            planet = r.pop("planet", "")
-            depth = r.pop("depth", 1)
-            r["metadata"] = {"planet": planet, "depth": depth}
+            fluid_key = recipe.pop("fluid", {}).get("key", "")
+            amount = recipe.pop("outputAmount", 0)
+            recipe["outputFluids"] = [{"key": fluid_key, "amount": amount}]
+            recipe["duration"] = 0
+            recipe.setdefault("baseRatePerSecond", amount * 2)
+            planet = recipe.pop("planet", "")
+            depth = recipe.pop("depth", 1)
+            recipe["metadata"] = {"planet": planet, "depth": depth}
         elif "SpacePumpModuleRecipeHandler" in filepath:
-            # 旧格式：{fluid, planetType, gasType, amount}
-            # → 新格式：{outputFluids, eut, duration, metadata}
-            fluid_key = r.pop("fluid", {}).get("key", "")
-            amount = r.pop("amount", 0)
-            r["outputFluids"] = [{"key": fluid_key, "amount": amount}]
-            r["eut"] = 0
-            r["duration"] = 0
-            planet_type = r.pop("planetType", 0)
-            gas_type = r.pop("gasType", 0)
-            r["metadata"] = {"planetType": planet_type, "gasType": gas_type}
-        fixed.append(r)
-    print(f"    Fixed {len(fixed)} non-standard recipes -> standard format")
+            fluid_key = recipe.pop("fluid", {}).get("key", "")
+            amount = recipe.pop("amount", 0)
+            recipe["outputFluids"] = [{"key": fluid_key, "amount": amount}]
+            recipe["eut"] = 0
+            recipe["duration"] = 0
+            planet_type = recipe.pop("planetType", 0)
+            gas_type = recipe.pop("gasType", 0)
+            recipe["metadata"] = {"planetType": planet_type, "gasType": gas_type}
+        fixed.append(recipe)
+    logger.debug("修正非标准配方格式：%d 条", len(fixed))
     return fixed
 
 
-def do_recipes():
-    """recipes/**/*.json -> Recipes/<mod>/<handler>.json（单文件，保留源相对路径与命名）"""
-    print("\n[Recipes]")
-    recipes_dir = os.path.join(DUMPER_DIR, "recipes")
-    json_files = glob.glob(os.path.join(recipes_dir, "**/*.json"), recursive=True)
+def run_recipes(source_dir, output_dir, items):
+    logger.debug("开始处理 Recipes")
+    recipes_dir = os.path.join(source_dir, "recipes")
+    json_files = []
+    for root, dirs, files in os.walk(recipes_dir):
+        dirs[:] = [name for name in dirs if name.casefold() != "filtered"]
+        json_files.extend(
+            os.path.join(root, name) for name in files if name.endswith(".json")
+        )
     json_files.sort()
-    print(f"  Found {len(json_files)} source file(s)")
+    logger.debug("发现配方文件：%d 个", len(json_files))
 
-    associations = (
-        RecipeAssociations(_FULL_ITEMS) if _FULL_ITEMS is not None else None
-    )
-    if associations is None:
-        print("  [NBT fix] 本进程未先运行 items，跳过 NBT/通配归一化")
-
+    associations = RecipeAssociations(items)
     written_files = 0
     written_recipes = 0
-    for fp in json_files:
-        rel = os.path.relpath(fp, recipes_dir)   # 如 gregtech/GTNEIDefaultHandler_abs_non_alloy_recipes.json
+    for filepath in json_files:
         try:
-            data = json.load(open(fp, "r", encoding="utf-8"))
-        except Exception as e:
-            print(f"  !! 读取失败 {rel}: {e}")
+            with open(filepath, "r", encoding="utf-8") as stream:
+                data = json.load(stream)
+        except Exception as exc:
+            logger.warning("读取配方文件失败：%s，错误：%s", filepath, exc)
             continue
 
-        recipes = [r for r in data.get("recipes", []) if isinstance(r, dict)]
+        recipes = [item for item in data.get("recipes", []) if isinstance(item, dict)]
         if not recipes:
+            logger.debug("跳过空配方文件：%s", filepath)
             continue
 
-        # 修正非标准 recipe 格式（行星气体钻机 / 太空钻机）
-        if "GasSiphonRecipeHandler" in fp or "SpacePumpModuleRecipeHandler" in fp:
-            recipes = _fix_recipe_format(recipes, fp)
+        if "GasSiphonRecipeHandler" in filepath or "SpacePumpModuleRecipeHandler" in filepath:
+            recipes = _fix_recipe_format(recipes, filepath)
 
-        # Special case: bee genetics NBT data makes individual recipes >2MB
-        if "AcclimatiserRecipeHandler_acclimatiser" in fp:
-            print(f"  !! 跳过（蜜蜂基因 NBT 过大）{rel}")
+        if "AcclimatiserRecipeHandler_acclimatiser" in filepath:
+            logger.warning("跳过蜜蜂基因 NBT 过大的配方文件：%s", filepath)
             continue
 
-        out_obj = {k: v for k, v in data.items() if k != "recipes"}
-        out_obj["recipes"] = recipes
+        metadata = {key: value for key, value in data.items() if key != "recipes"}
+        rel = os.path.relpath(filepath, recipes_dir)
+        output = {**metadata, "recipes": recipes}
+        for recipe in recipes:
+            normalize_recipe_roles(recipe, metadata)
+            associations.associate(recipe, rel)
 
-        if associations is not None:
-            for recipe in recipes:
-                normalize_recipe_roles(recipe, out_obj)
-                associations.associate(recipe, rel)
-
-        out_path = os.path.join(DATA_SPLIT_DIR, "Recipes", rel)
+        out_path = os.path.join(output_dir, "Recipes", rel)
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(out_obj, f, ensure_ascii=False, indent=2)
-
-        print(f"  {rel}: {len(recipes):,} recipes")
+        with open(out_path, "w", encoding="utf-8") as stream:
+            json.dump(output, stream, ensure_ascii=False, indent=2)
+        logger.debug("写入配方文件 %s：%d 条", rel, len(recipes))
         written_files += 1
         written_recipes += len(recipes)
 
-    print(f"  Recipes done: {written_files:,} file(s), {written_recipes:,} recipes")
-    if associations is not None:
-        associations.write_reports(DATA_SPLIT_DIR)
+    associations.write_reports(output_dir)
+    logger.debug(
+        "Recipes 处理完成：%d 个文件，%d 条配方",
+        written_files,
+        written_recipes,
+    )
+    return {
+        "recipes": written_recipes,
+        "recipeFiles": written_files,
+        "association": {
+            "missingNbt": len(associations.missing),
+            "ambiguousNbt": len(associations.ambiguous),
+            "unresolvedWildcards": len(associations.unresolved_wildcards),
+        },
+    }
 
 
-# ============================================================
-# Entry point
-# ============================================================
-
-TASKS = {
-    "items":   ("Items",         do_items),
-    "oredict": ("OreDictionary", do_oredictionary),
-    "recipes": ("Recipes",       do_recipes),
-}
-
-
-def main():
-    args = [a.lower() for a in sys.argv[1:] if not a.startswith("--")]
-
-    if not args:
-        tasks_to_run = list(TASKS.keys())
-    else:
-        tasks_to_run = [a for a in args if a in TASKS]
-        unknown = [a for a in args if a not in TASKS]
-        if unknown:
-            print(f"Unknown task(s): {unknown}")
-            print(f"Available: {', '.join(TASKS.keys())}")
-            return
-
-    print(f"Output root: {DATA_SPLIT_DIR}")
-    for key in tasks_to_run:
-        TASKS[key][1]()
-
-    print("\nAll done!")
-
-
-if __name__ == "__main__":
-    main()
+__all__ = [
+    "normalize_ore_dictionary",
+    "run_items",
+    "run_oredictionary",
+    "run_recipes",
+]

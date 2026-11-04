@@ -1,7 +1,7 @@
-"""Stage-2 recipe normalization and equivalent-input grouping.
+"""规范化阶段的配方整理与等效输入分组。
 
-Reads the preprocessed Data tree and produces canonical recipes with
-InputSlot/InputGroup and concrete CatalystSet/CatalystGroup data.
+读取预处理后的 Data，生成包含 InputSlot/InputGroup 和具体
+CatalystSet/CatalystGroup 的规范配方。
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ ALERT_MULTIPLE_CIRCUIT = "MULTIPLE_CIRCUIT"
 
 
 # ---------------------------------------------------------------------------
-# Small helpers
+# 基础辅助函数
 # ---------------------------------------------------------------------------
 
 def _amount(value, default):
@@ -110,7 +110,6 @@ def _add_alert(recipe, code, message, **details):
     alerts.append(entry)
     recipe["needsReview"] = True
     suffix = " ".join(f"{key}={value!r}" for key, value in details.items())
-    print(f"[ALERT] {code}: {message}" + (f" ({suffix})" if suffix else ""))
     logger.warning("[%s] %s %s", code, message, details)
 
 
@@ -130,7 +129,7 @@ def _merge_alerts(target_recipe, source_recipe):
 
 
 # ---------------------------------------------------------------------------
-# Slot signatures / unions
+# 槽位签名与并集
 # ---------------------------------------------------------------------------
 
 def _catalyst_slot_signature(slot):
@@ -188,11 +187,11 @@ def _slot_union(first, second):
 
 
 # ---------------------------------------------------------------------------
-# Normalization
+# 规范化
 # ---------------------------------------------------------------------------
 
 def _normalize_nc_group(items, alert_recipe, circuit, catalyst_slots):
-    """Turn a group of nc alternatives into circuit + catalyst choices."""
+    """把一组 nc 候选项整理为电路和催化剂候选。"""
     circuits = []
     others = []
     for item in items:
@@ -351,11 +350,11 @@ def _output_variants(raw, alert_recipe):
 
 
 # ---------------------------------------------------------------------------
-# Expansion
+# 展开
 # ---------------------------------------------------------------------------
 
 def build_item_base_index(item_keys):
-    """Build a best-effort ``base -> concrete keys`` index for :32767 expansion."""
+    """为 :32767 展开建立 ``基础 key -> 具体 key`` 索引。"""
     index = defaultdict(set)
     for key in item_keys:
         if not isinstance(key, str) or not key or key.endswith(_WILDCARD_META):
@@ -522,7 +521,7 @@ def _expand_slot(slot, ore_dictionary, item_keys, item_base_index, alert_recipe)
 
 
 def normalize_recipe(raw, ore_dictionary, item_keys, item_base_index):
-    """Normalize one raw recipe into one or more grouped recipes."""
+    """把一条原始配方整理为一条或多条分组配方。"""
     input_alert_recipe = {"alerts": [], "needsReview": False}
     slots = _normalize_input_slots(raw, input_alert_recipe)
     expanded_slots = [
@@ -549,7 +548,7 @@ def normalize_recipe(raw, ore_dictionary, item_keys, item_base_index):
 
 
 # ---------------------------------------------------------------------------
-# Merge
+# 合并
 # ---------------------------------------------------------------------------
 
 def _output_signature(recipe):
@@ -670,7 +669,7 @@ def _merge_recipes(recipes):
             active[new_id] = new_recipe
             add_to_index(new_id, new_recipe)
 
-    # Exact duplicates (zero slot difference) are arbitrary; keep one.
+    # 完全重复（槽位无差异）的项任取一项即可，只保留一个。
     deduped = {}
     for recipe_id in sorted(active):
         recipe = active[recipe_id]
@@ -686,7 +685,7 @@ def _merge_recipes(recipes):
 
 
 # ---------------------------------------------------------------------------
-# Orphan marking / finalization
+# 孤儿标记与收尾
 # ---------------------------------------------------------------------------
 
 def _mark_orphans(recipes, mode):
@@ -805,7 +804,7 @@ def _slots_to_fields(recipe):
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# 对外接口
 # ---------------------------------------------------------------------------
 
 def group_recipes(
@@ -816,7 +815,7 @@ def group_recipes(
     machine_name="",
     orphan_mode="contains",
 ):
-    """Return (translated grouped recipes, report)."""
+    """返回翻译后的分组配方与统计报告。"""
     item_base_index = build_item_base_index(item_keys)
     normalized = []
     for raw in raw_recipes or []:
@@ -832,7 +831,7 @@ def group_recipes(
     for recipe in merged:
         _slots_to_fields(recipe)
 
-    # Keep administrative metadata out of the recursive item translator.
+    # 管理字段不参与递归物料翻译。
     admin_fields = ("alerts", "orphan")
     preserved = [
         {field: recipe.pop(field, None) for field in admin_fields}

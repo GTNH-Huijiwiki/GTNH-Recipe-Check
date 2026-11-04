@@ -1,25 +1,34 @@
-"""Canonical stage-2 domain contracts for serialized recipe data."""
+﻿"""规范化阶段的正式领域契约。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Mapping, Union
+
+
+Number = Union[int, float]
 
 
 @dataclass(frozen=True)
 class MaterialRef:
+    """配方中引用的一种具体物料。"""
+
     key: str
     kind: str
-    amount: int
+    amount: Number
     original_name: str = ""
     translated_name: str = ""
 
+    @property
+    def identity(self):
+        return self.kind, self.key
+
     @classmethod
-    def from_dict(cls, value, kind):
+    def from_dict(cls, value):
         return cls(
             key=value.get("key", ""),
-            kind=kind,
-            amount=int(value.get("amount", 0)),
+            kind=value.get("kind", "item"),
+            amount=value.get("amount", 0),
             original_name=value.get("originalName", ""),
             translated_name=value.get("translatedName", ""),
         )
@@ -27,151 +36,210 @@ class MaterialRef:
     def to_dict(self):
         return {
             "key": self.key,
+            "kind": self.kind,
+            "amount": self.amount,
             "originalName": self.original_name,
             "translatedName": self.translated_name,
-            "amount": self.amount,
         }
 
 
 @dataclass(frozen=True)
 class InputSlot:
+    """一个输入槽，槽内候选取 OR。"""
+
     alternatives: tuple[MaterialRef, ...]
+
+    @classmethod
+    def from_dict(cls, value):
+        return cls(
+            tuple(MaterialRef.from_dict(item) for item in value.get("alternatives", []))
+        )
+
+    def to_dict(self):
+        return {"alternatives": [item.to_dict() for item in self.alternatives]}
 
 
 @dataclass(frozen=True)
 class InputGroup:
+    """一个配方的全部输入槽，槽间取 AND。"""
+
     slots: tuple[InputSlot, ...]
+
+    @classmethod
+    def from_dict(cls, value):
+        return cls(tuple(InputSlot.from_dict(slot) for slot in value.get("slots", [])))
+
+    def to_dict(self):
+        return {"slots": [slot.to_dict() for slot in self.slots]}
 
 
 @dataclass(frozen=True)
 class CatalystSet:
+    """一个催化条件，内部材料与电路取 AND。"""
+
+    set_id: str
     catalysts: tuple[MaterialRef, ...]
     circuit: MaterialRef | None
     kind: str = "normal"
 
     def __post_init__(self):
         if self.kind == "normal" and not self.catalysts and not self.circuit:
-            raise ValueError("normal CatalystSet may not be empty")
+            raise ValueError("普通催化集不能为空")
+
+    @classmethod
+    def from_dict(cls, value):
+        circuit = value.get("circuit")
+        return cls(
+            set_id=value.get("setId", ""),
+            catalysts=tuple(
+                MaterialRef.from_dict(item) for item in value.get("catalysts", [])
+            ),
+            circuit=MaterialRef.from_dict(circuit) if circuit else None,
+            kind=value.get("kind", "normal"),
+        )
+
+    def to_dict(self):
+        return {
+            "setId": self.set_id,
+            "kind": self.kind,
+            "catalysts": [item.to_dict() for item in self.catalysts],
+            "circuit": self.circuit.to_dict() if self.circuit else None,
+        }
 
 
 @dataclass(frozen=True)
 class CatalystGroup:
+    """一个配方的全部催化集，集合间取 OR。"""
+
     sets: tuple[CatalystSet, ...]
+
+    @classmethod
+    def from_dict(cls, value):
+        return cls(tuple(CatalystSet.from_dict(item) for item in value.get("sets", [])))
+
+    def to_dict(self):
+        return {"sets": [item.to_dict() for item in self.sets]}
 
 
 @dataclass(frozen=True)
 class OutputGroup:
+    """配方的具体产物。"""
+
     items: tuple[MaterialRef, ...] = ()
     fluids: tuple[MaterialRef, ...] = ()
+
+    @classmethod
+    def from_dict(cls, value):
+        return cls(
+            items=tuple(
+                MaterialRef.from_dict(item) for item in value.get("items", [])
+            ),
+            fluids=tuple(
+                MaterialRef.from_dict(item) for item in value.get("fluids", [])
+            ),
+        )
+
+    def to_dict(self):
+        return {
+            "items": [item.to_dict() for item in self.items],
+            "fluids": [item.to_dict() for item in self.fluids],
+        }
+
+
+@dataclass(frozen=True)
+class OrphanInfo:
+    """配方输入的孤儿标记。"""
+
+    has_orphan_input: bool = False
+    only_orphan_inputs: bool = False
+    orphan_items: tuple[str, ...] = ()
+    orphan_fluids: tuple[str, ...] = ()
+    mode: str = "contains"
+
+    @classmethod
+    def from_dict(cls, value):
+        value = value or {}
+        return cls(
+            has_orphan_input=bool(value.get("hasOrphanInput", False)),
+            only_orphan_inputs=bool(value.get("onlyOrphanInputs", False)),
+            orphan_items=tuple(value.get("orphanItems", [])),
+            orphan_fluids=tuple(value.get("orphanFluids", [])),
+            mode=value.get("mode", "contains"),
+        )
+
+    def to_dict(self):
+        return {
+            "hasOrphanInput": self.has_orphan_input,
+            "onlyOrphanInputs": self.only_orphan_inputs,
+            "orphanItems": list(self.orphan_items),
+            "orphanFluids": list(self.orphan_fluids),
+            "mode": self.mode,
+        }
+
+
+@dataclass(frozen=True)
+class RecipeProvenance:
+    """规范化配方的来源信息。"""
+
+    source_file: str
+    source: str = ""
+    identifier: str = ""
+
+    @classmethod
+    def from_dict(cls, value):
+        value = value or {}
+        return cls(
+            source_file=value.get("sourceFile", ""),
+            source=value.get("source", ""),
+            identifier=value.get("identifier", ""),
+        )
+
+    def to_dict(self):
+        return {
+            "sourceFile": self.source_file,
+            "source": self.source,
+            "identifier": self.identifier,
+        }
 
 
 @dataclass(frozen=True)
 class Recipe:
+    """规范化阶段的完整配方契约。"""
+
     recipe_id: str
     machine: str
     input_group: InputGroup
     catalyst_group: CatalystGroup
     output_group: OutputGroup
-    orphan: Mapping[str, Any] = field(default_factory=dict)
-    metadata: Mapping[str, Any] = field(default_factory=dict)
+    orphan: OrphanInfo = field(default_factory=OrphanInfo)
+    provenance: RecipeProvenance = field(
+        default_factory=lambda: RecipeProvenance(source_file="")
+    )
+    diagnostics: tuple[Mapping[str, Any], ...] = ()
 
     @classmethod
     def from_dict(cls, value):
-        fixed_slots = [
-            InputSlot((MaterialRef.from_dict(item, "item"),))
-            for item in value.get("inputItems", [])
-        ]
-        fluid_slots = [
-            InputSlot((MaterialRef.from_dict(item, "fluid"),))
-            for item in value.get("inputFluids", [])
-        ]
-        group_slots = [
-            InputSlot(
-                tuple(
-                    MaterialRef.from_dict(member, group.get("kind", "item"))
-                    for member in group.get("members", [])
-                )
-            )
-            for group in value.get("inputGroups", [])
-        ]
-        catalyst_sets = []
-        for group in value.get("catalystGroups", []):
-            catalysts = tuple(
-                MaterialRef.from_dict(item, "catalyst")
-                for item in group.get("catalysts", [])
-            )
-            circuit_value = group.get("circuit")
-            circuit = (
-                MaterialRef.from_dict(circuit_value, "circuit")
-                if circuit_value
-                else None
-            )
-            if catalysts or circuit:
-                catalyst_sets.append(CatalystSet(catalysts, circuit))
         return cls(
             recipe_id=value.get("recipeId", ""),
             machine=value.get("machine", ""),
-            input_group=InputGroup(tuple(fixed_slots + fluid_slots + group_slots)),
-            catalyst_group=CatalystGroup(tuple(catalyst_sets)),
-            output_group=OutputGroup(
-                tuple(
-                    MaterialRef.from_dict(item, "item")
-                    for item in value.get("outputItems", [])
-                ),
-                tuple(
-                    MaterialRef.from_dict(item, "fluid")
-                    for item in value.get("outputFluids", [])
-                ),
+            input_group=InputGroup.from_dict(value.get("inputGroup", {})),
+            catalyst_group=CatalystGroup.from_dict(
+                value.get("catalystGroup", {})
             ),
-            orphan=dict(value.get("orphan") or {}),
-            metadata={
-                key: value[key]
-                for key in ("alerts", "needsReview")
-                if key in value
-            },
+            output_group=OutputGroup.from_dict(value.get("outputGroup", {})),
+            orphan=OrphanInfo.from_dict(value.get("orphan", {})),
+            provenance=RecipeProvenance.from_dict(value.get("provenance", {})),
+            diagnostics=tuple(dict(item) for item in value.get("diagnostics", [])),
         )
 
     def to_dict(self):
-        input_items = []
-        input_fluids = []
-        input_groups = []
-        for slot in self.input_group.slots:
-            if len(slot.alternatives) == 1:
-                material = slot.alternatives[0]
-                (input_items if material.kind == "item" else input_fluids).append(
-                    material.to_dict()
-                )
-            elif slot.alternatives:
-                input_groups.append(
-                    {
-                        "kind": slot.alternatives[0].kind,
-                        "members": [item.to_dict() for item in slot.alternatives],
-                    }
-                )
-        catalyst_groups = []
-        for catalyst_set in self.catalyst_group.sets:
-            catalyst_groups.append(
-                {
-                    "catalysts": [
-                        item.to_dict() for item in catalyst_set.catalysts
-                    ],
-                    "circuit": (
-                        catalyst_set.circuit.to_dict()
-                        if catalyst_set.circuit
-                        else None
-                    ),
-                }
-            )
-        result = {
-            "inputItems": input_items,
-            "inputFluids": input_fluids,
-            "outputItems": [item.to_dict() for item in self.output_group.items],
-            "outputFluids": [item.to_dict() for item in self.output_group.fluids],
-            "catalystGroups": catalyst_groups,
-            "inputGroups": input_groups,
-            "orphan": dict(self.orphan),
+        return {
+            "recipeId": self.recipe_id,
+            "machine": self.machine,
+            "inputGroup": self.input_group.to_dict(),
+            "catalystGroup": self.catalyst_group.to_dict(),
+            "outputGroup": self.output_group.to_dict(),
+            "orphan": self.orphan.to_dict(),
+            "provenance": self.provenance.to_dict(),
+            "diagnostics": [dict(item) for item in self.diagnostics],
         }
-        result.update(self.metadata)
-        if self.recipe_id:
-            result["recipeId"] = self.recipe_id
-        return result

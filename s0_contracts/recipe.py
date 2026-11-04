@@ -1,4 +1,4 @@
-"""Shared recipe and catalyst-group identities, labels and ordering."""
+"""配方与催化组的共享身份、标签和排序规则。"""
 
 from __future__ import annotations
 
@@ -167,7 +167,7 @@ def readable_group_label(group, abstract_groups):
 
 
 def recipe_io_signature(recipe):
-    """Return input/output signature excluding catalyst groups and quantities."""
+    """返回忽略催化组和数量的输入输出签名。"""
 
     return tuple(
         tuple(sorted(item.get("key", "") for item in recipe.get(field, [])))

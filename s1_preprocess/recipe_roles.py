@@ -1,4 +1,4 @@
-"""Classify NEI auxiliary stacks before recipe pages and output buckets are written."""
+"""在发布配方前，对 NEI 辅助槽位进行分类。"""
 
 INPUT_SOURCES = {
     'codechicken.nei.recipe.FurnaceRecipeHandler',
@@ -6,7 +6,7 @@ INPUT_SOURCES = {
     'ganymedes01.etfuturum.compat.nei.BlastFurnaceRecipeHandler',
     'ganymedes01.etfuturum.compat.nei.SmokerRecipeHandler',
 }
-# Research-station auxiliary stacks display already-written research results; keep them in otherItems.
+# 研究站的辅助槽位用于展示已写入的研究结果，因此保留在 otherItems 中。
 INPUT_IDENTIFIERS = {'cropsnh.recipes.cropGeneExtractor'}
 OUTPUT_IDENTIFIERS = {
     'EnderIOSagMill', 'EnderIOSoulBinder', 'thaumictinkerer.infusedseeds',
@@ -21,11 +21,11 @@ OUTPUT_SOURCES = {
 
 
 def normalize_recipe_roles(recipe, metadata):
-    """Move known ingredients/byproducts out of otherItems, preserving candidate order.
+    """把已知的输入材料或副产物从 otherItems 中移出，并保持候选顺序。
 
-    NEI getOtherStacks combines fuel, catalysts and byproducts. Source-specific
-    roles are resolved here so querying, calculators and renderers share them.
-    Unrecognized auxiliary stacks retain their original meaning and fields.
+    NEI 的 getOtherStacks 会把燃料、催化剂和副产物混在一起。这里按来源识别
+    槽位角色，使查询、计算和渲染共享同一结果。无法识别的辅助槽位保持原字段
+    和语义不变。
     """
     source = metadata.get('source') or ''
     identifier = metadata.get('identifier') or ''
@@ -36,7 +36,7 @@ def normalize_recipe_roles(recipe, metadata):
     if source in INPUT_SOURCES or identifier in INPUT_IDENTIFIERS or source.endswith('ImbuingStationRecipeHandler'):
         recipe['inputItems'] = list(recipe.get('inputItems') or []) + others
     elif source == 'alkalus.main.nei.NEI_Handler_Oven':
-        # The oven exports optional fuel, then its byproduct and the required clay jar.
+        # 烤箱导出依次为可选燃料、副产物和必需的粘土罐。
         inputs = list(recipe.get('inputItems') or [])
         inputs.extend([None] * max(0, 3 - len(inputs)))
         if len(others) == 3:

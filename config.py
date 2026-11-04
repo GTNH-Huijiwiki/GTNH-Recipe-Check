@@ -2,10 +2,10 @@
 
 from pathlib import Path
 
-# GTNH Dumper 导出的原始数据目录（split.py 的输入）
+# GTNH Dumper 导出的原始数据目录（第一步处理器的输入）
 DUMPER_DIR = Path("./Raw/2.9.0")
 
-# split.py 的输出目录，即本仓库其它模块的数据根目录
+# 第一步处理器的输出目录，即本仓库其它模块的数据根目录
 DATA_SPLIT_DIR = Path("./Data/2.9.0")
 DATA_DIR = DATA_SPLIT_DIR
 
@@ -25,22 +25,13 @@ OUTPUT_ROOT = Path("Output")
 OUTPUT_VERSION = DATA_SPLIT_DIR.name
 VERSIONED_OUTPUT_ROOT = OUTPUT_ROOT / OUTPUT_VERSION
 
-# 运行日志
+# 统一运行日志
 LOG_FILE = VERSIONED_OUTPUT_ROOT / "recipe_check.log"
 
-# 旧链路：1 清洗产物目录
-CLEANED_RECIPES_DIR = VERSIONED_OUTPUT_ROOT / "cleaned_recipes"
+# 规范化阶段产物目录
+NORMALIZED_DIR = VERSIONED_OUTPUT_ROOT / "normalized"
 
-# 旧链路：2 过滤产物目录
-FILTERED_RECIPES_DIR = VERSIONED_OUTPUT_ROOT / "filtered_recipes"
-
-# 0 组/无条件配方单向串配方全量报告（分析层使用虚拟无条件组）
-EMPTY_CONFLICT_FILE = FILTERED_RECIPES_DIR / "empty_group_conflicts.json"
-
-# 3 着色产物目录
-COLORED_RECIPES_DIR = VERSIONED_OUTPUT_ROOT / "colored_recipes"
-
-# 1 阶段等效输入组产物目录（独立于现有冲突检查下游）
+# 旧的扁平分组产物目录，仅供尚未迁移的后续阶段临时使用
 GROUPED_RECIPES_DIR = VERSIONED_OUTPUT_ROOT / "grouped_recipes"
 
 # 基于分组配方执行 Rules + 最小催化组覆盖的产物目录

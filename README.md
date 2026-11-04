@@ -26,17 +26,18 @@
 
 ```text
 GTNH-Recipe-Check/
-├── main.py                 # 五阶段编排入口
+├── main.py                 # 阶段编排入口
 ├── config.py               # 集中配置
 ├── s0_contracts/           # 阶段间共享契约、签名、标签、日志
-├── s1_preprocess/          # 1. Raw -> Data 预处理
+│   └── DATA_CONTRACTS.md   # 跨阶段数据结构约定
+├── s1_preprocess/          # 0. Raw -> Data 预处理（同步 Wiki Toolchain）
 ├── s2_normalize/           # 2. 输入组/催化组规范化
 ├── s3_rules/               # 3. 机器规则
 ├── s4_cover/               # 3. 最小催化集覆盖与关系分析
 ├── s5_conflict/            # 4. 无向冲突矩阵构建
 ├── s6_color/               # 5. 图染色搜索与最终催化组合并
 ├── s9_validation/          # 测试、实验与手工复核工具
-├── Data/                   # s1_preprocess 的输出
+├── Data/                   # 第一步产物
 └── Output/<version>/                 # s2-s6 的阶段性产物
 ```
 
@@ -45,7 +46,7 @@ GTNH-Recipe-Check/
 | 前缀 | 阶段 | 主要职责 |
 |---|---|---|
 | `s0_contracts` | 公共契约 | 催化组、配方签名、标签、日志 |
-| `s1_preprocess` | 1 | Dumper 原始数据整理为 Data |
+| `s1_preprocess` | 1 | Dumper 原始数据整理为 Data；变换严格同步 Wiki Toolchain |
 | `s2_normalize` | 2 | InputSlot/InputGroup、CatalystSet/CatalystGroup 规范化 |
 | `s3_rules` | 3 | 按机器执行 Rules |
 | `s4_cover` | 3 | 关系划分与最小催化集覆盖 |
@@ -55,35 +56,23 @@ GTNH-Recipe-Check/
 
 ---
 
-## 快速开始：split 与 main 的分工
+## 快速开始
 
-两个入口职责完全不同，**绝大多数时候只需要跑 `main.py`**。
-
-| | `s1_preprocess` | `main.py` |
-|---|---|---|
-| 作用 | 把 Dumper 原始导出整理成统一格式的数据集 | 执行规范化、规则、覆盖、冲突和着色 |
-| 输入 | `config.DUMPER_DIR` | `config.DATA_DIR` 与各阶段产物 |
-| 输出 | `Data/<版本>/`：`Items.json`、`OreDictionary.json`、`Recipes/` 等 | `Output/<version>/`：各阶段产物与日志 |
-| 何时跑 | 数据源更新时 | 修改规则、配置或算法时 |
-
-### 什么时候跑 split
-
-只有没有导出Data或当你手上有了**新的 Dumper 导出**时才需要：
+第一步是一个完整处理器：`Raw -> Items -> OreDictionary -> Recipes -> Data`。三个子任务必须在同一处理器内按此顺序执行，因为配方关联依赖完整物品记录中的 `rawKey`/`nbt`。
 
 ```bash
-python main.py --stage preprocess       # items + oredict + recipes
-python -m s1_preprocess.split items     # 仅 Items
-python -m s1_preprocess.split oredict   # 仅 OreDictionary
-python -m s1_preprocess.split recipes   # 仅 Recipes
-python -m s1_preprocess.split items recipes
+python main.py --stage preprocess       # 第一步：Raw -> Data
+python main.py --stage normalize        # 后续阶段
+python main.py --stage all              # 从 Raw 开始完整执行
 ```
 
-- `items` 必须先于 `recipes`：Recipes 的 NBT/通配解析依赖完整 item 信息（`rawKey`/`nbt`），落盘的 `Items.json` 只保留三列；解析使用 `nbt_identity` 规范化 SNBT，并递归处理嵌套候选槽位，故两项应在同一进程内执行。
-- 产物目录由 `config.DATA_SPLIT_DIR` 指定；换版本时改这里即可（`main.py` 会自动跟随，因为 `DATA_DIR = DATA_SPLIT_DIR`）。
+- 实现入口是 `s1_preprocess/handler.py`，`split.py` 只提供数据变换，不再作为独立 CLI 保留任务选择分支。
+- 产物目录由 `config.DATA_SPLIT_DIR` 指定；换版本时修改 `DUMPER_DIR` 与 `DATA_SPLIT_DIR`。
+- 第一步直接以 `GTNH-Chinese-Wiki-Toolchain/databaseDump/split_all.py` 为参考实现，保留本项目消费的数据变换，不保留 Wiki 页面、图片、tooltip 等展示层代码。
 
 #### DUMPER_DIR 需要包含的文件
 
-`s1_preprocess/split.py` 只读以下四项（均为 `DUMPER_DIR` 下的相对路径，由 GTNH Dumper 导出）：
+第一步处理器只读以下四项（均为 `DUMPER_DIR` 下的相对路径，由 GTNH Dumper 导出）：
 
 | 路径 | 顶层结构 | 用途 |
 |---|---|---|
@@ -99,7 +88,7 @@ python -m s1_preprocess.split items recipes
 ### 五阶段独立执行
 
 ```bash
-python main.py --stage preprocess   # s1：Raw -> Data
+python main.py --stage preprocess   # 第一步：Raw -> Data
 python main.py --stage normalize    # s2：规范化输入/催化组合
 python main.py --stage cover        # s3：Rules + 最小催化集覆盖
 python main.py --stage conflict     # s4：冲突矩阵
@@ -116,13 +105,6 @@ python -m unittest discover -s s9_validation -v
 ```
 
 `s9_validation` 同时收纳回归测试、历史染色实验和手工冲突复核工具。
-
-旧链路仍保留：
-
-```bash
-python main.py --legacy
-python main.py --legacy --rebuild
-```
 
 ### 阶段数据约定
 
@@ -184,8 +166,6 @@ python main.py --legacy --rebuild
 | 参数 | 说明 |
 |---|---|
 | `--stage <name>` | 单独执行 `preprocess` / `normalize` / `cover` / `conflict` / `color` / `all`。 |
-| `--legacy` | 运行旧的 `cleaned_recipes → filtered_recipes → colored_recipes` 链路。 |
-| `--rebuild` | 仅与 `--legacy` 配合，强制重新生成旧链路的清洗与过滤产物。 |
 
 不传 `--stage` 时执行 `normalize → cover → conflict → color`；`--stage all` 额外从 Raw 开始执行预处理。
 
@@ -195,18 +175,14 @@ python main.py --legacy --rebuild
 
 | 配置项 | 说明 | 当前值 |
 |---|---|---|
-| `DUMPER_DIR` | GTNH Dumper 导出的原始数据目录，`s1_preprocess/split.py` 的输入（需包含的文件见上节「DUMPER_DIR 需要包含的文件」） | `./Raw/2.9.0` |
+| `DUMPER_DIR` | GTNH Dumper 导出的原始数据目录，`s1_preprocess/split.py` 与 `s1_preprocess/handler.py` 的输入（需包含的文件见上节「DUMPER_DIR 需要包含的文件」） | `./Raw/2.9.0` |
 | `DATA_SPLIT_DIR` | split 的输出目录，即数据集根目录 | `./Data/2.9.0` |
 | `DATA_DIR` | `main.py` 读取的数据根目录，默认等于 `DATA_SPLIT_DIR` | `= DATA_SPLIT_DIR` |
 | `INTERESTED_MACHINES` | 本次要处理的机器白名单（可填多台）。机器名 = 导出文件名去掉 `GTNEIDefaultHandler_` 前缀与 `.json` 后缀 | `{"alloyblastsmelter", "assembler", "fluidchemicaleactor", "largechemicalreactor", "laserengraver", "multimixer", "press"}` |
 | `OUTPUT_ROOT` | 输出总目录 | `Output` |
 | `OUTPUT_VERSION` | 输出版本名，默认取 `DATA_SPLIT_DIR.name` | `2.9.0` |
 | `VERSIONED_OUTPUT_ROOT` | 按版本隔离的阶段产物根目录 | `Output/<version>` |
-| `LOG_FILE` | 旧链路运行日志路径 | `Output/<version>/recipe_check.log` |
-| `CLEANED_RECIPES_DIR` | 1 清洗产物目录 | `Output/<version>/cleaned_recipes` |
-| `FILTERED_RECIPES_DIR` | 2 过滤产物目录 | `Output/<version>/filtered_recipes` |
-| `COLORED_RECIPES_DIR` | 3 着色产物目录 | `Output/<version>/colored_recipes` |
-| `GROUPED_RECIPES_DIR` | 正式主流程的等效输入分组产物目录 | `Output/<version>/grouped_recipes` |
+| `NORMALIZED_DIR` | 规范化阶段产物目录 | `Output/<version>/normalized` |
 | `FILTERED_GROUPED_RECIPES_DIR` | 分组配方规则过滤 + 最小催化组覆盖产物目录 | `Output/<version>/filtered_grouped_recipes` |
 | `CATALYST_RELATION_REPORT` | 催化组关系规范 JSON | `Output/<version>/filtered_grouped_recipes/catalyst_relations.json` |
 | `CATALYST_CONTAINMENT_REPORT` | 纯包含链 Markdown 报告 | `Output/<version>/filtered_grouped_recipes/catalyst_containments.md` |
@@ -221,7 +197,7 @@ python main.py --legacy --rebuild
 | `COLOR_CLASS_SIZE_SWEEP_MAX` | 逐 1 扫描的最大档位（从 2 起）；`None` 表示扫到 `COLOR_CLASS_MAX_SIZE` 或节点数 | `12` |
 | `LOG_EMPTY_CONFLICT_CONSOLE` | 空催化组（编程电路0）与其它催化组的串配方单向检查是否在终端显示；`False` 时只在日志文件中记录 | `False` |
 
-正式链路中，白名单机器若找不到配方文件会记录警告并跳过；旧 `--legacy` 链路会报错停止。
+正式链路中，白名单机器若找不到配方文件会记录警告并跳过。
 
 `:32767` 通配在 split 阶段按物品真实变体展开，并在 `association_report.json` / `oredictionary_associations.json` 中记录无候选项；`s2_normalize/ore_dictionary.py` 的 `EXPAND_WILDCARD_32767` 仅作为下游兜底开关。
 
@@ -231,15 +207,11 @@ python main.py --legacy --rebuild
 
 ```mermaid
 flowchart LR
-    A["Dumper 导出<br/>(DUMPER_DIR)"] -->|s1_preprocess/split.py| B["Data/&lt;版本&gt;<br/>Items / OreDictionary / Recipes"]
-    B -->|main.py 1| H["grouped_recipes<br/>等效输入分组"]
+    A["Dumper 导出<br/>(DUMPER_DIR)"] -->|PreprocessHandler| B["Data/&lt;版本&gt;<br/>Items / OreDictionary / Recipes"]
+    B -->|main.py 1| H["normalized<br/>规范化配方"]
     H -->|main.py 2<br/>Rules + 最小覆盖| I["filtered_grouped_recipes"]
     I -->|main.py 3<br/>orphan + bitset + slot match| J["conflict_graph.json"]
-    B -->|main.py --legacy| C["cleaned_recipes<br/>旧清洗 + 翻译"]
-    C -->|s3_rules/*.clean| D["规则删减后"]
-    D -->|reduce_catalyst_groups| E["filtered_recipes"]
-    E -->|build_conflict_graph| F["conflict_graph"]
-    F -->|color_graph + apply_coloring| G["colored_recipes<br/>旧着色链路"]
+    J -->|color_graph + apply_coloring| K["colored_grouped_recipes"]
 ```
 
 ---
@@ -248,27 +220,16 @@ flowchart LR
 
 | 路径 | 内容 |
 |---|---|
-| `Output/<version>/recipe_check.log` | 运行日志（映射失败、自冲突、问题计数等） |
-| `Output/<version>/cleaned_recipes/{machine}.json` | 清洗 + 等效合并 + 翻译后的配方（保留 `key`） |
-| `Output/<version>/cleaned_recipes/index.json` | 已清洗机器索引（跨次运行合并） |
-| `Output/<version>/filtered_recipes/{machine}.json` | 规则删减 + 催化组删减后的配方（含 `recipeId`） |
-| `Output/<version>/filtered_recipes/index.json` | 已过滤机器索引 |
-| `Output/<version>/filtered_recipes/catalyst_reduction.json` | 催化组删减元数据（关系分量、顶层候选、等价组、抽象催化剂） |
-| `Output/<version>/filtered_recipes/conflict_graph.json` | 各机器冲突图（节点、邻接矩阵；仅下三角非零；含空催化组串配方计数 `empty_group_conflict_counts`） |
-| `Output/<version>/filtered_recipes/empty_group_conflicts.json` | 空催化组（编程电路0）单向串配方**全量**报告（逐对列出 `recipeId` 与输入输出摘要、涉及的两个催化组及其配方数） |
-| `Output/<version>/colored_recipes/{machine}.json` | 着色后配方（催化组已替换为合并后的颜色组；组按「组内最小电路编号升序、无电路的组最后」排列） |
-| `Output/<version>/colored_recipes/coloring.json` | 着色方案汇总（最优轮次 `best_round`、颜色、节点归属、合并后催化组、各组覆盖配方数降序 `recipe_class_sizes`；`colors` 按输出组序排列） |
-| `Output/<version>/grouped_recipes/{machine}.json` | 1 阶段等效输入组结果（`inputGroups` / `catalystGroups` / `alerts` / `orphan`） |
-| `Output/<version>/grouped_recipes/index.json` | 分组结果索引与统计 |
-| `Output/<version>/grouped_recipes/grouping.log` | 分组阶段日志 |
-| `Output/<version>/filtered_grouped_recipes/filter_grouped.log` | 分组配方 Rules 与最小覆盖日志 |
+| `Output/<version>/recipe_check.log` | 统一运行日志：记录详细进度、警告、错误和异常堆栈 |
+| `Output/<version>/normalized/manifest.json` | s2 上游输入、产物文件和聚合输出哈希 |
+| `Output/<version>/normalized/machines/<machine>/recipes.json` | 规范化 Recipe 列表 |
+| `Output/<version>/normalized/machines/<machine>/catalyst_sets.json` | 该机器使用的唯一 CatalystSet 注册表 |
 | `Output/<version>/filtered_grouped_recipes/{machine}.json` | 分组配方经 Rules 过滤、催化组最小覆盖后的配方（保留 `inputGroups` 和规范 `catalystGroups`） |
 | `Output/<version>/filtered_grouped_recipes/catalyst_reduction.json` | 分组链路的关系分量、等价组、顶层候选、精确集合覆盖统计与最优性标记 |
 | `Output/<version>/filtered_grouped_recipes/catalyst_relations.json` | 催化组覆盖关系规范：原始组、等价类、五类关系与覆盖规模 |
 | `Output/<version>/filtered_grouped_recipes/catalyst_containments.md` | 最底层等价类到最顶层根组的纯包含链清单 |
 | `Output/<version>/filtered_grouped_recipes/conflict_graph.json` | 分组输入感知的冲突图；含稀疏边、邻接矩阵与 `build_stats` |
 | `Output/<version>/filtered_grouped_recipes/empty_group_conflicts.json` | 空催化组单向冲突全量报告 |
-| `Output/<version>/grouped_recipes/orphan_report.json` | 各机器孤儿标记汇总 |
 
 ---
 
@@ -329,12 +290,12 @@ $$ Recipes(G) = \bigcup_{\emptyset \neq S \subseteq G} Recipes(S) $$
 
 ## 方案流程
 
-### 0. 数据准备（s1_preprocess/split.py）
-把 Dumper 导出整理为 `Data/<版本>/`：`Items.json`（`key`/`originalName`/`translatedName`）、`OreDictionary.json`（`{矿辞典名: [key...]}`）、`Recipes/<来源>/GTNEIDefaultHandler_<机器>.json`。split 会在此阶段完成名称格式码清理、`nbt_identity` NBT 归一化、`:32767` 通配展开、矿辞通配校验和 `otherItems` 角色归类。
+### 0. 数据准备（s1_preprocess）
+把 Dumper 导出整理为 `Data/<版本>/`：`Items.json`（`key`/`originalName`/`translatedName`）、`OreDictionary.json`（`{矿辞典名: [key...]}`）、`Recipes/<来源>/GTNEIDefaultHandler_<机器>.json`。第一步严格同步 Wiki Toolchain 的数据变换：物品/流体 key 归一化、`nbt_regress_cache`、`nbt_identity` NBT 关联、`:32767` 通配展开、矿辞通配校验和 `otherItems` 角色归类。
 
-### 1. 清洗与翻译
+### 1. 规范化
 
-- 只处理 `INTERESTED_MACHINES` 白名单内的机器；已有清洗产物且未 `--rebuild` 时直接复用。
+- 只处理 `INTERESTED_MACHINES` 白名单内的机器；已有分组产物在对应阶段复用。
 - **输入可选列表展开**：`inputItems`/`outputItems` 中同一项的多个可选对象按笛卡尔积展开为多条配方。
 - **附加槽位归类**：`s1_preprocess/recipe_roles.py` 把熔炉/高炉/燃料/作物基因提取器等已知 `otherItems` 归入输入或输出，保留候选顺序、概率和不消耗标记。
 - **拆分催化条件**：带 `nc` 标记的输入项按是否为编程电路，分别归入催化组的 `circuit` / `catalysts`。
@@ -369,7 +330,7 @@ $$ Recipes(G) = \bigcup_{\emptyset \neq S \subseteq G} Recipes(S) $$
    - **bitset 候选召回**：按输入 key 预计算可提供该 key 的配方 bitset，对目标槽求交得到候选源，最后再做精确槽位匹配。
    - **输出相等豁免**：若两配方输出（物品+流体，忽略数量）**完全相同**，则即使输入构成包含也视为良性连带，不判为串配方（不记自冲突、不连边）。
    - **自冲突**：落在同一催化组内、且构成串配方的非等效配方对，记入日志（无法靠分组解决）。
-   - **0 组/无条件配方单向全量检查**：分析层只统计「其它组配方 → 无条件配方」方向；orphan 无条件配方不会成为被触发目标。全量报告写入正式链路的 `Output/<version>/filtered_grouped_recipes/empty_group_conflicts.json`（旧链仍写 `Output/<version>/filtered_recipes/empty_group_conflicts.json`），`conflict_graph.json` 的 `empty_group_conflict_counts` 只保留计数。
+   - **0 组/无条件配方单向全量检查**：分析层只统计「其它组配方 → 无条件配方」方向；orphan 无条件配方不会成为被触发目标。全量报告写入 `Output/<version>/filtered_grouped_recipes/empty_group_conflicts.json`，`conflict_graph.json` 的 `empty_group_conflict_counts` 只保留计数。
 2. **着色**（`color_graph` + `apply_coloring`）：
    - 相邻节点必须不同色（即冲突的催化组不能共处同一缓存）；
    - 同色节点合并为一个新催化组；
@@ -379,14 +340,13 @@ $$ Recipes(G) = \bigcup_{\emptyset \neq S \subseteq G} Recipes(S) $$
    - 多轮随机探索后**只保留并输出最优一轮**（`coloring.json` 中的 `best_round` 记录其轮号）。
    - **跨次运行也只保留最优**：`graph_fingerprint` 一致（冲突图未变）且历史方案不差时，沿用历史结果并重新套用到当前配方。
    - 合并后的催化组可含多个编程电路，标签展示时按编号升序，无编号的「编程电路0」排最前。
-   - **输出组间排序**（`group_output_order_key`）：`colored_recipes/{machine}.json` 中每条配方的催化组、`coloring.json` 与终端列出的各组，均按「组内最小编号升序」排列；无编程电路的组排最后；完全空组（无条件反应）视作「编程电路0」排最前。
+   - **输出组间排序**（`group_output_order_key`）：`colored_grouped_recipes/{machine}.json` 中每条配方的催化组、`coloring.json` 与终端列出的各组，均按「组内最小编号升序」排列；无编程电路的组排最后；完全空组（无条件反应）视作「编程电路0」排最前。
 
 ---
 
 ## 常见问题
 
-- **改了 `s3_rules/` 但结果没变**：正式链路会重新计算；只有旧链路需要 `python main.py --legacy --rebuild`。
+- **改了 `s3_rules/` 但结果没变**：正式链路会重新计算。
 - **只想更新部分机器**：把目标机器放入白名单即可，未列入的机器旧产物不受影响。
 - **想新增某台机器的删减规则**：在 `s3_rules/<机器>.py` 实现 `clean` 并到 `s3_rules/registry.py` 注册。
-- **想换一版旧着色方案**：调整 `COLORING_ROUNDS`（或 `COLOR_CLASS_MAX_SIZE`）后运行 `python main.py --legacy`；旧着色链路每次都会重算，且只保留历史最优。
 - **展示/日志乱码（Windows）**：控制台重定向可能因 GBK 无法输出中文与特殊符号，可改用 `python -X utf8 ...` 或先执行 `chcp 65001`。

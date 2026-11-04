@@ -1,11 +1,10 @@
-"""配方物品关联：NBT 规范化、通配展开与缺失诊断。
+﻿"""配方物品关联，逻辑对齐 Wiki Toolchain 第一步预处理。"""
 
-逻辑对应 GTNH-Chinese-Wiki-Toolchain/databaseDump/split_all.py 的
-_RecipeAssociations，供 s1_preprocess/split.py 在写出 Recipes 前调用。
-"""
+from __future__ import annotations
 
 import csv
 import json
+import logging
 import os
 
 try:
@@ -13,171 +12,307 @@ try:
 except ImportError:
     from nbt_identity import nbt_identity
 
-_ITEM_SLOTS = (
-    "inputItems", "outputItems", "otherItems", "keyItem", "exampleInput",
-    "inputFluids", "outputFluids",
-    "normalDrops", "rareDrops", "additionalDrops", "infernalDrops",
-    "eliteItems", "ultraItems", "infernoItems", "fishItems", "junkItems",
-    "treasureItems",
-)
+logger = logging.getLogger(__name__)
 
-_WILDCARD = ":32767"
-
-
-def _wildcard_base(raw):
-    """通配 key 的注册名：去掉末尾数字 meta，保留物品名本身。"""
-    if raw.count(":") >= 2 and raw.rsplit(":", 1)[1].isdigit():
-        return raw.rsplit(":", 1)[0]
-    return raw
+BEE_TYPES_BY_RAW_KEY = {
+    "Forestry:beeDroneGE": "DRONE",
+    "Forestry:beePrincessGE": "PRINCESS",
+    "Forestry:beeQueenGE": "QUEEN",
+    "Forestry:beeLarvaeGE": "LARVAE",
+}
 
 
-def iter_item_entries(value):
-    """递归展开槽位中的物品对象（兼容单个对象、候选列表与嵌套列表）。"""
+def _bee_query_key(identity):
+    if not isinstance(identity, dict):
+        return None
+    species_uid = identity.get("speciesUid")
+    bee_type = identity.get("type")
+    if not isinstance(species_uid, str) or not species_uid:
+        return None
+    if not isinstance(bee_type, str) or bee_type not in set(BEE_TYPES_BY_RAW_KEY.values()):
+        return None
+    return f"bee:{bee_type}:{species_uid}"
+
+
+def _index_wildcard_item(item, wildcard_index, wildcard_nbt_index):
+    raw = item.get("rawKey") or item.get("key", "")
+    key = item.get("key", "")
+    if not raw or not key or raw.endswith(":32767"):
+        return
+    base = (
+        raw.rsplit(":", 1)[0]
+        if raw.count(":") >= 2 and raw.rsplit(":", 1)[1].isdigit()
+        else raw
+    )
+    wildcard_index.setdefault(base, set()).add(key)
+    nbt = item.get("nbt") or ""
+    if nbt:
+        wildcard_nbt_index.setdefault((base, nbt_identity(nbt)), set()).add(key)
+
+
+def _iter_recipe_item_entries(value):
     if isinstance(value, list):
         for entry in value:
-            yield from iter_item_entries(entry)
+            yield from _iter_recipe_item_entries(entry)
     elif isinstance(value, dict):
-        if "key" in value:
+        if "key" in value or "beeIdentity" in value:
             yield value
         else:
             for entry in value.values():
-                yield from iter_item_entries(entry)
+                yield from _iter_recipe_item_entries(entry)
 
 
 class RecipeAssociations:
-    """一次建立物品索引，在写出配方前完成 NBT 与 :32767 归一化。"""
+    """在发布配方前建立精确 NBT 与蜜蜂身份索引。"""
 
     def __init__(self, items):
-        self.nbt_index = {}
-        self.wildcard_index = {}
-        self.wildcard_nbt_index = {}
-        self.missing = set()
-        self.ambiguous = []
-        self.unresolved_wildcards = set()
-        self.total = 0
-        self.replaced = 0
+        logger.debug("[NBT 修正] 从 Items 建立精确 NBT 与蜜蜂身份索引")
+        nbt_index = {}
+        bee_index = {}
+        wildcard_index = {}
+        wildcard_nbt_index = {}
         for item in items:
-            raw = item.get("rawKey") or item.get("key", "")
+            raw_key = item.get("rawKey", "") or item.get("key", "")
+            nbt = item.get("nbt", "") or ""
             key = item.get("key", "")
-            if not raw or not key or raw.endswith(_WILDCARD):
-                continue
-            base = _wildcard_base(raw)
-            self.wildcard_index.setdefault(base, set()).add(key)
-            nbt = item.get("nbt") or ""
-            identity = nbt_identity(nbt or "{}")
-            self.nbt_index.setdefault((raw, identity), set()).add(key)
-            if nbt and identity != nbt_identity("{}"):
-                self.wildcard_nbt_index.setdefault((base, identity), set()).add(key)
-
-    def expand_wildcard(self, entry):
-        """把 :32767 槽位展开为真实物品候选；无候选时保留并记录。"""
-        if isinstance(entry, list):
-            expanded = []
-            for candidate in entry:
-                value = self.expand_wildcard(candidate)
-                expanded.extend(value if isinstance(value, list) else [value])
-            return expanded
-
-        raw = (
-            entry if isinstance(entry, str)
-            else entry.get("key", "") if isinstance(entry, dict)
-            else ""
+            _index_wildcard_item(item, wildcard_index, wildcard_nbt_index)
+            if raw_key and key and nbt:
+                nbt_index.setdefault((raw_key, nbt_identity(nbt)), set()).add(key)
+            query_key = item.get("queryKey") or _bee_query_key(item.get("beeIdentity"))
+            if query_key and key:
+                bee_index.setdefault(query_key, set()).add(key)
+        logger.debug(
+            "[NBT 修正] 已索引 %d 组精确 NBT，%d 个蜜蜂身份 key",
+            len(nbt_index),
+            len(bee_index),
         )
-        if not raw.endswith(_WILDCARD):
-            return entry
 
-        nbt = entry.get("nbt") if isinstance(entry, dict) else None
-        base = raw[: -len(_WILDCARD)]
-        identity = nbt_identity(nbt) if nbt else None
-        if identity is not None and identity != nbt_identity("{}"):
-            choices = sorted(self.wildcard_nbt_index.get((base, identity), ()))
-        else:
-            choices = sorted(self.wildcard_index.get(base, ()))
-        if not choices:
-            self.unresolved_wildcards.add(raw)
-            unresolved = dict(entry) if isinstance(entry, dict) else {"key": raw}
-            unresolved["displayKey"] = "unresolved-wildcard:" + raw
-            unresolved["associationError"] = "missing_concrete_wildcard_candidates"
-            return unresolved
+        self.slot_keys = (
+            "inputItems",
+            "outputItems",
+            "otherItems",
+            "keyItem",
+            "exampleInput",
+            "inputFluids",
+            "outputFluids",
+            "normalDrops",
+            "rareDrops",
+            "additionalDrops",
+            "infernalDrops",
+            "eliteItems",
+            "ultraItems",
+            "infernoItems",
+            "fishItems",
+            "junkItems",
+            "treasureItems",
+        )
+        self.nbt_index = nbt_index
+        self.bee_index = bee_index
+        self.wildcard_index = wildcard_index
+        self.wildcard_nbt_index = wildcard_nbt_index
+        self.total = self.replaced = 0
+        self.missing = set()
+        self.unresolved_wildcards = set()
+        self.diagnostics = []
 
-        return [
-            dict({k: v for k, v in entry.items() if k != "nbt"}, key=key, rawKey=raw)
-            if isinstance(entry, dict)
-            else key
-            for key in choices
-        ]
+    def associate(self, recipe, relative_file):
+        nbt_index = self.nbt_index
+        bee_index = self.bee_index
+        wildcard_index = self.wildcard_index
+        wildcard_nbt_index = self.wildcard_nbt_index
+        modified = False
 
-    def associate(self, recipe, relative_file=""):
-        """展开输入通配，并把所有槽位中的 NBT 物品解析为最终 key。"""
-        for slot in ("inputItems", "keyItem"):
-            if slot not in recipe or recipe[slot] is None:
+        def expand_wildcard(entry):
+            if isinstance(entry, list):
+                expanded = []
+                for candidate in entry:
+                    value = expand_wildcard(candidate)
+                    expanded.extend(value if isinstance(value, list) else [value])
+                return expanded
+            raw = (
+                entry
+                if isinstance(entry, str)
+                else entry.get("key", "") if isinstance(entry, dict) else ""
+            )
+            if not raw.endswith(":32767"):
+                return entry
+            nbt = entry.get("nbt") if isinstance(entry, dict) else None
+            choices = sorted(
+                wildcard_nbt_index.get((raw[:-6], nbt_identity(nbt)), ())
+                if nbt
+                else wildcard_index.get(raw[:-6], ())
+            )
+            if not choices:
+                self.unresolved_wildcards.add(raw)
+                unresolved = dict(entry) if isinstance(entry, dict) else {"key": raw}
+                unresolved["displayKey"] = "unresolved-wildcard:" + raw
+                unresolved["associationError"] = "missing_concrete_wildcard_candidates"
+                return unresolved
+            return [
+                dict({key: value for key, value in entry.items() if key != "nbt"}, key=key, rawKey=raw)
+                if isinstance(entry, dict)
+                else key
+                for key in choices
+            ]
+
+        if isinstance(recipe.get("inputItems"), list):
+            previous = recipe["inputItems"]
+            recipe["inputItems"] = [expand_wildcard(entry) for entry in previous]
+            modified = modified or recipe["inputItems"] != previous
+        if recipe.get("keyItem") is not None:
+            previous = recipe["keyItem"]
+            recipe["keyItem"] = expand_wildcard(previous)
+            modified = modified or recipe["keyItem"] != previous
+
+        for slot_key in self.slot_keys:
+            items = recipe.get(slot_key)
+            if not isinstance(items, (list, dict)):
                 continue
-            value = recipe[slot]
-            if isinstance(value, list):
-                recipe[slot] = [self.expand_wildcard(entry) for entry in value]
-            else:
-                recipe[slot] = self.expand_wildcard(value)
-
-        for slot in _ITEM_SLOTS:
-            value = recipe.get(slot)
-            if not isinstance(value, (list, dict)):
-                continue
-            for item in iter_item_entries(value):
+            for item in _iter_recipe_item_entries(items):
                 nbt = item.get("nbt", "") or ""
                 key = item.get("key", "")
-                if not nbt or not key:
+                if not key:
                     continue
+                original_key = key
+                expected_bee_type = BEE_TYPES_BY_RAW_KEY.get(key)
+                identity = item.get("beeIdentity")
+                query_key = _bee_query_key(identity)
+                if identity is not None or expected_bee_type:
+                    if not query_key or (
+                        expected_bee_type and identity.get("type") != expected_bee_type
+                    ):
+                        self.diagnostics.append(
+                            {
+                                "file": relative_file,
+                                "_recipe": recipe,
+                                "recipeIndex": recipe.get("index"),
+                                "slot": slot_key,
+                                "rawKey": key,
+                                "beeIdentity": identity,
+                                "issue": "missing_or_mismatched_identity_reexport_required",
+                            }
+                        )
+                    else:
+                        item["queryKey"] = query_key
+                        modified = True
 
+                if not nbt:
+                    continue
                 self.total += 1
-                identity = nbt_identity(nbt)
-                candidates = self.nbt_index.get((key, identity), set())
-                if len(candidates) == 1:
+                exact_candidates = nbt_index.get((key, nbt_identity(nbt)), set())
+                if len(exact_candidates) == 1:
                     item["rawKey"] = key
-                    item["key"] = next(iter(candidates))
+                    item["key"] = next(iter(exact_candidates))
                     del item["nbt"]
                     self.replaced += 1
-                elif len(candidates) > 1:
+                    modified = True
+                elif len(exact_candidates) > 1:
                     item["associationError"] = "ambiguous_exact_item_association"
                     item["displayKey"] = "unresolved-nbt:" + key
-                    self.ambiguous.append(
+                    modified = True
+                    if query_key:
+                        item["displayKey"] = query_key
+                        item["associationError"] = "ambiguous_exact_item_association"
+                    self.diagnostics.append(
                         {
                             "file": relative_file,
-                            "key": key,
-                            "nbt": nbt,
-                            "candidates": sorted(candidates),
+                            "_recipe": recipe,
+                            "recipeIndex": recipe.get("index"),
+                            "slot": slot_key,
+                            "rawKey": key,
+                            "issue": "ambiguous_exact_item_association",
+                            "candidates": sorted(exact_candidates),
                         }
                     )
                 else:
+                    self.missing.add((key, nbt))
                     item["associationError"] = "missing_exact_nbt_item"
                     item["displayKey"] = "unresolved-nbt:" + key
-                    self.missing.add((key, nbt))
+                    modified = True
+                    if query_key:
+                        display_candidates = bee_index.get(query_key, set())
+                        if len(display_candidates) == 1:
+                            item["displayKey"] = next(iter(display_candidates))
+                            modified = True
+                        else:
+                            issue = (
+                                "missing_display_item"
+                                if not display_candidates
+                                else "ambiguous_display_item"
+                            )
+                            item["displayKey"] = query_key
+                            item["associationError"] = issue
+                            modified = True
+                            self.diagnostics.append(
+                                {
+                                    "file": relative_file,
+                                    "_recipe": recipe,
+                                    "recipeIndex": recipe.get("index"),
+                                    "slot": slot_key,
+                                    "rawKey": original_key,
+                                    "queryKey": query_key,
+                                    "issue": issue,
+                                    "candidates": sorted(display_candidates),
+                                }
+                            )
+                    elif expected_bee_type:
+                        item["displayKey"] = f"unresolved-bee:{expected_bee_type}"
+                        item["associationError"] = (
+                            "missing_or_mismatched_identity_reexport_required"
+                        )
+                        modified = True
+        return modified
+
+    @property
+    def ambiguous(self):
+        return [
+            diagnostic
+            for diagnostic in self.diagnostics
+            if "ambiguous" in diagnostic.get("issue", "")
+        ]
 
     def report(self):
-        print(
-            f"  [NBT fix] Total NBT items: {self.total}, replaced: {self.replaced}, "
-            f"remaining: {self.total - self.replaced}"
-        )
-        print(
-            f"  [NBT fix] missing pairs: {len(self.missing)}, "
-            f"ambiguous pairs: {len(self.ambiguous)}, "
-            f"unresolved wildcards: {len(self.unresolved_wildcards)}"
+        remaining = self.total - self.replaced
+        logger.debug(
+            "[NBT 修正] NBT 物品总数 %d，已替换 %d，剩余 %d",
+            self.total,
+            self.replaced,
+            remaining,
         )
 
     def write_reports(self, output_dir):
         self.report()
         os.makedirs(output_dir, exist_ok=True)
+
         if self.missing:
             path = os.path.join(output_dir, "nbt_missing.csv")
-            with open(path, "w", encoding="utf-8-sig", newline="") as f:
-                writer = csv.writer(f)
+            with open(path, "w", encoding="utf-8-sig", newline="") as stream:
+                writer = csv.writer(stream)
                 writer.writerow(["key", "nbt"])
                 for key, nbt in sorted(self.missing):
                     writer.writerow([key, nbt])
-            print(
-                f"  [NBT fix] Missing (key, nbt) written to {path}: "
-                f"{len(self.missing)} unique rows"
+            logger.warning(
+                "[NBT 修正] 缺失的 (key, nbt) 已写入 %s：%d 条",
+                path,
+                len(self.missing),
             )
 
+        diagnostics = []
+        for source in self.diagnostics:
+            row = {key: value for key, value in source.items() if key != "_recipe"}
+            row["recipeIndex"] = source["_recipe"].get("index")
+            diagnostics.append(row)
+        if diagnostics:
+            path = os.path.join(output_dir, "bee_association_diagnostics.json")
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump(diagnostics, stream, ensure_ascii=False, indent=2)
+            logger.warning(
+                "[蜜蜂身份] 诊断信息已写入 %s：%d 条",
+                path,
+                len(diagnostics),
+            )
+
+        path = os.path.join(output_dir, "association_report.json")
         report = {
             "ambiguous_nbt": self.ambiguous,
             "missing_nbt": [
@@ -185,7 +320,6 @@ class RecipeAssociations:
             ],
             "unresolved_wildcards": sorted(self.unresolved_wildcards),
         }
-        path = os.path.join(output_dir, "association_report.json")
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
-        print(f"  [NBT fix] Association report written to {path}")
+        with open(path, "w", encoding="utf-8") as stream:
+            json.dump(report, stream, ensure_ascii=False, indent=2)
+        logger.debug("[NBT 修正] 关联报告已写入 %s", path)
