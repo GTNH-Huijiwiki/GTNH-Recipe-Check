@@ -3,14 +3,14 @@
 import logging
 from copy import deepcopy
 
-from Core.catalyst_relations import (
+from s4_cover.catalyst_relations import (
     RELATION_SCHEMA,
     classify_relation,
     pure_containment_chains,
 )
-from Core.grouped_schema import concrete_catalyst_groups, expand_catalyst_choices
-from Core.recipe_checker import group_label, group_signature, item_signature
-from Core.set_cover import minimum_set_cover
+from s2_normalize.grouped_schema import concrete_catalyst_groups, expand_catalyst_choices
+from s0_contracts.recipe import group_label, group_signature, item_signature
+from s4_cover.set_cover import minimum_set_cover
 
 logger = logging.getLogger(__name__)
 

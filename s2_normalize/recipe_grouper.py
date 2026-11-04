@@ -1,8 +1,7 @@
-"""Stage-1 recipe grouping: normalize, expand input groups, merge one-slot differences.
+"""Stage-2 recipe normalization and equivalent-input grouping.
 
-This module is intentionally independent from the existing conflict checker.  It
-produces a richer cleaned recipe schema with ``inputGroups`` / ``catalystGroups``
-and orphan metadata, so downstream code can be migrated separately.
+Reads the preprocessed Data tree and produces canonical recipes with
+InputSlot/InputGroup and concrete CatalystSet/CatalystGroup data.
 """
 
 from __future__ import annotations
@@ -13,8 +12,8 @@ from collections import Counter, defaultdict, deque
 from copy import deepcopy
 from itertools import product
 
-from Core.catalyst_group import normalize_catalyst_groups
-from Core.translator import translate_recipes
+from s0_contracts.catalyst_group import normalize_catalyst_groups
+from s2_normalize.translator import translate_recipes
 
 logger = logging.getLogger(__name__)
 

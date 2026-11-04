@@ -6,7 +6,7 @@ originalName/translatedName 分别用于规则删减与展示输出。
 
 import logging
 
-from Core.virtual_key import is_virtual_key
+from s2_normalize.virtual_key import is_virtual_key
 
 logger = logging.getLogger(__name__)
 

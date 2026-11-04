@@ -1,6 +1,6 @@
 """规则注册中心：维护机器名到清理函数的映射。"""
 
-from Rules import assembler, fluidchemicaleactor, laserengraver, press
+from s3_rules import assembler, fluidchemicaleactor, laserengraver, press
 
 # 机器名 -> 清理函数（输入：翻译后的配方列表，输出：删减后的配方列表）
 _MACHINE_CLEANERS = {

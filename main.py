@@ -4,34 +4,35 @@ import sys
 from pathlib import Path
 
 import config
-from Core.data_loader import (
+from s2_normalize.data_loader import (
     load_machine_recipes,
     load_item_translations,
     load_ore_dictionary,
 )
-from Core.recipe_cleaner import clean_and_merge_recipes
-from Core.recipe_grouper import group_recipes as build_grouped_recipes
-from Core.translator import translate_recipes
-from Core.logger import configure_logging
-from Core.recipe_checker import (
-    abstract_group_map,
+from s2_normalize.recipe_cleaner import clean_and_merge_recipes
+from s2_normalize.recipe_grouper import group_recipes as build_grouped_recipes
+from s2_normalize.translator import translate_recipes
+from s0_contracts.logger import configure_logging
+from s0_contracts.schema import Recipe as RecipeContract
+from s0_contracts.recipe import (
     assign_recipe_ids,
-    build_conflict_graph,
     group_output_order_key,
     readable_group_label,
 )
-from Core.catalyst_reducer import reduce_catalyst_groups
-from Core.catalyst_relations import (
+from s4_cover.catalyst_reducer import reduce_catalyst_groups
+from s4_cover.catalyst_relations import (
+    abstract_group_map,
     containment_markdown,
     machine_relation_report,
 )
-from Core.graph_coloring import (
+from s5_conflict.recipe_checker import build_conflict_graph
+from s6_color.graph_coloring import (
     apply_coloring,
     color_graph,
     graph_fingerprint,
     node_coverages,
 )
-from Rules.registry import get_cleaner
+from s3_rules.registry import get_cleaner
 
 logger = logging.getLogger(__name__)
 
@@ -534,8 +535,8 @@ def _find_machine_recipe_file(machine_name):
 def run_group_recipes():
     """1. 将 DATA_DIR 中的机器配方构建为等效输入分组产物。
 
-    正式实现中，本步骤不再由 scripts/ 入口负责。scripts/ 只保留
-    Raw -> Data 的数据预处理职责。
+    正式实现中，本步骤由 s2_normalize 承担；s1_preprocess 只负责
+    Raw -> Data 的数据预处理。
     """
     logger.info("========== 1 等效输入分组 ==========")
     output_dir = config.GROUPED_RECIPES_DIR
@@ -564,6 +565,10 @@ def run_group_recipes():
             machine_name=machine_name,
             orphan_mode=config.GROUP_ORPHAN_MODE,
         )
+        # Validate the stage-boundary contract without changing serialized data.
+        for recipe in grouped:
+            RecipeContract.from_dict(recipe)
+
         output_path = output_dir / f"{machine_name}.json"
         _write_json(output_path, grouped)
 
@@ -593,13 +598,10 @@ def run_group_recipes():
     return len(index)
 
 
-def run_filter_grouped_recipes():
-    """对分组配方执行 Rules、最小催化组覆盖与冲突图构建。
+def run_cover_grouped_recipes():
+    """Stage 3: apply Rules and select the minimum catalyst-set cover."""
 
-    分组数据已是预处理产物，因此这里不再经过 scripts/split.py 或
-    recipe_cleaner，而是直接读取 Output/grouped_recipes。
-    """
-    logger.info("========== 分组配方：Rules 过滤与最小催化组覆盖 ==========")
+    logger.info("========== s3 cover: Rules + minimum catalyst cover ==========")
     grouped_dir = config.GROUPED_RECIPES_DIR
     output_dir = config.FILTERED_GROUPED_RECIPES_DIR
     _ensure_dir(output_dir)
@@ -609,13 +611,9 @@ def run_filter_grouped_recipes():
         for entry in _load_list(grouped_dir / "index.json")
         if entry.get("machine")
     }
-    _ensure_dir(config.COLORED_GROUPED_RECIPES_DIR)
     output_index = []
     reduction_metadata = []
     relation_reports = []
-    conflict_graphs = []
-    empty_conflict_reports = []
-    coloring_results = []
 
     for machine_name in sorted(config.INTERESTED_MACHINES):
         source_path = grouped_dir / f"{machine_name}.json"
@@ -634,40 +632,10 @@ def run_filter_grouped_recipes():
         output_path = output_dir / source_path.name
         _write_json(output_path, filtered_recipes)
 
-        empty_report = {}
-        conflict_graph = build_conflict_graph(
-            machine_name,
-            filtered_recipes,
-            abstract_group_map([metadata]),
-            config.LOG_EMPTY_CONFLICT_CONSOLE,
-            empty_conflict_report=empty_report,
-        )
-        conflict_graphs.append(conflict_graph)
-        empty_conflict_reports.append(empty_report)
-
-        abstract_groups = abstract_group_map([metadata])
-        coloring = color_graph(
-            conflict_graph,
-            config.COLORING_ROUNDS,
-            config.COLOR_CLASS_MAX_SIZE,
-            node_coverages(filtered_recipes, conflict_graph),
-            size_sweep=config.COLOR_CLASS_SIZE_SWEEP,
-            sweep_max_size=config.COLOR_CLASS_SIZE_SWEEP_MAX,
-        )
-        colored_recipes, merged_groups = apply_coloring(
-            filtered_recipes, conflict_graph, coloring
-        )
-        fingerprint = graph_fingerprint(conflict_graph)
-        coloring_result = _coloring_summary(
-            machine_name, coloring, merged_groups, fingerprint
-        )
-        coloring_results.append(coloring_result)
-        _write_json(
-            config.COLORED_GROUPED_RECIPES_DIR / source_path.name,
-            colored_recipes,
-        )
-
         source_entry = source_index.get(machine_name, {})
+        relation_report = machine_relation_report(machine_name, metadata)
+        relation_reports.append(relation_report)
+        reduction_metadata.append(metadata)
         summary = {
             "machine": machine_name,
             "name": source_entry.get("name", ""),
@@ -680,31 +648,17 @@ def run_filter_grouped_recipes():
                 for recipe in filtered_recipes
             ),
             "uniqueGroupCount": metadata.get("unique_group_count", 0),
-            "activeGroupCount": len(metadata.get("selected_groups", [])),
             "selectedGroupCount": len(metadata.get("selected_groups", [])),
             "componentCount": metadata.get("relationship_component_count", 0),
             "optimal": bool(metadata.get("set_cover", {}).get("optimal")),
-            "conflictNodeCount": len(conflict_graph.get("nodes", [])),
-            "conflictEdgeCount": len(conflict_graph.get("edges", [])),
-            "orphanTargetsPruned": conflict_graph.get(
-                "build_stats", {}
-            ).get("orphan_targets_pruned", 0),
-            "colorCount": coloring.get("color_count", 0),
-            "largestRecipeClass": coloring.get(
-                "largest_recipe_class", 0
+            "relationCounts": metadata.get("relation_counts", {}),
+            "containmentChainCount": len(
+                metadata.get("pure_containment_chains", [])
             ),
         }
-        relation_report = machine_relation_report(machine_name, metadata)
-        relation_reports.append(relation_report)
-        summary["relationCounts"] = metadata.get("relation_counts", {})
-        summary["containmentChainCount"] = len(
-            metadata.get("pure_containment_chains", [])
-        )
         output_index.append(summary)
-        _print_coloring(coloring_result, abstract_groups)
-        reduction_metadata.append(metadata)
         logger.info(
-            "分组配方 %s: %d -> %d 条；唯一组 %d；选中组 %d；最优=%s",
+            "s3 cover %s: %d -> %d recipes; unique=%d; selected=%d; optimal=%s",
             machine_name,
             summary["recipeCount"],
             summary["filteredRecipeCount"],
@@ -716,59 +670,223 @@ def run_filter_grouped_recipes():
     _write_json(output_dir / "index.json", output_index)
     _write_json(output_dir / "catalyst_reduction.json", reduction_metadata)
     _write_json(config.CATALYST_RELATION_REPORT, relation_reports)
-    _write_json(config.GROUPED_CONFLICT_FILE, conflict_graphs)
-    _write_json(config.GROUPED_EMPTY_CONFLICT_FILE, empty_conflict_reports)
-    _write_json(config.GROUPED_COLORING_FILE, coloring_results)
     config.CATALYST_CONTAINMENT_REPORT.write_text(
         containment_markdown(relation_reports),
         encoding="utf-8",
     )
     logger.info("已生成: %s", output_dir)
-    logger.info("已生成: %s", config.CATALYST_RELATION_REPORT)
-    logger.info("已生成: %s", config.CATALYST_CONTAINMENT_REPORT)
-    logger.info("已生成: %s", config.GROUPED_CONFLICT_FILE)
-    logger.info("已生成: %s", config.GROUPED_EMPTY_CONFLICT_FILE)
-    logger.info("已生成: %s", config.GROUPED_COLORING_FILE)
     return len(output_index)
 
 
-def main():
-    if "--legacy" not in sys.argv:
-        # 正式分组链路：分组 -> Rules -> 最小覆盖 -> 冲突图。
-        _ensure_dir(config.GROUPED_RECIPES_DIR)
-        grouping_counter = configure_logging(
-            config.GROUPED_RECIPES_DIR / "grouping.log"
+def run_grouped_conflicts():
+    """Stage 4: build undirected conflict matrices from covered recipes."""
+
+    logger.info("========== s4 conflict: conflict matrices ==========")
+    input_dir = config.FILTERED_GROUPED_RECIPES_DIR
+    metadata_by_machine = {
+        entry.get("machine", ""): entry
+        for entry in _load_list(input_dir / "catalyst_reduction.json")
+        if entry.get("machine")
+    }
+    index_by_machine = {
+        entry.get("machine", ""): entry
+        for entry in _load_list(input_dir / "index.json")
+        if entry.get("machine")
+    }
+
+    conflict_graphs = []
+    empty_conflict_reports = []
+    for machine_name in sorted(config.INTERESTED_MACHINES):
+        entry = index_by_machine.get(machine_name)
+        metadata = metadata_by_machine.get(machine_name)
+        if not entry or not metadata:
+            logger.warning("缺少 s3 覆盖产物，跳过冲突图: %s", machine_name)
+            continue
+        source_path = input_dir / entry.get("file", f"{machine_name}.json")
+        if not source_path.exists():
+            logger.warning("缺少覆盖后配方文件，跳过: %s", source_path)
+            continue
+        recipes = _load_list(source_path)
+        empty_report = {}
+        graph = build_conflict_graph(
+            machine_name,
+            recipes,
+            abstract_group_map([metadata]),
+            config.LOG_EMPTY_CONFLICT_CONSOLE,
+            empty_conflict_report=empty_report,
         )
-        grouped_count = run_group_recipes()
-        print(
-            f"分组完成：{grouped_count} 台机器；发现 {grouping_counter.count} 个问题。"
-            f"详细日志: {config.GROUPED_RECIPES_DIR / 'grouping.log'}"
+        conflict_graphs.append(graph)
+        empty_conflict_reports.append(empty_report)
+        logger.info(
+            "s4 conflict %s: nodes=%d; edges=%d; orphan_pruned=%d",
+            machine_name,
+            len(graph.get("nodes", [])),
+            len(graph.get("edges", [])),
+            graph.get("build_stats", {}).get("orphan_targets_pruned", 0),
         )
 
-        _ensure_dir(config.FILTERED_GROUPED_RECIPES_DIR)
-        filter_counter = configure_logging(
-            config.FILTERED_GROUPED_RECIPES_DIR / "filter_grouped.log"
+    _write_json(config.GROUPED_CONFLICT_FILE, conflict_graphs)
+    _write_json(config.GROUPED_EMPTY_CONFLICT_FILE, empty_conflict_reports)
+    return len(conflict_graphs)
+
+
+def run_grouped_color():
+    """Stage 5: run the configured coloring search on the conflict matrices."""
+
+    logger.info("========== s5 color: coloring search ==========")
+    _ensure_dir(config.COLORED_GROUPED_RECIPES_DIR)
+    input_dir = config.FILTERED_GROUPED_RECIPES_DIR
+    index_by_machine = {
+        entry.get("machine", ""): entry
+        for entry in _load_list(input_dir / "index.json")
+        if entry.get("machine")
+    }
+    metadata_by_machine = {
+        entry.get("machine", ""): entry
+        for entry in _load_list(input_dir / "catalyst_reduction.json")
+        if entry.get("machine")
+    }
+    graph_by_machine = {
+        entry.get("machine", ""): entry
+        for entry in _load_list(config.GROUPED_CONFLICT_FILE)
+        if entry.get("machine")
+    }
+
+    coloring_results = []
+    for machine_name in sorted(config.INTERESTED_MACHINES):
+        entry = index_by_machine.get(machine_name)
+        metadata = metadata_by_machine.get(machine_name)
+        graph = graph_by_machine.get(machine_name)
+        if not entry or not metadata or not graph:
+            logger.warning("缺少 s4 冲突图产物，跳过着色: %s", machine_name)
+            continue
+        source_path = input_dir / entry.get("file", f"{machine_name}.json")
+        if not source_path.exists():
+            logger.warning("缺少覆盖后配方文件，跳过着色: %s", source_path)
+            continue
+        recipes = _load_list(source_path)
+        coloring = color_graph(
+            graph,
+            config.COLORING_ROUNDS,
+            config.COLOR_CLASS_MAX_SIZE,
+            node_coverages(recipes, graph),
+            size_sweep=config.COLOR_CLASS_SIZE_SWEEP,
+            sweep_max_size=config.COLOR_CLASS_SIZE_SWEEP_MAX,
         )
-        filtered_count = run_filter_grouped_recipes()
+        colored_recipes, merged_groups = apply_coloring(
+            recipes, graph, coloring
+        )
+        fingerprint = graph_fingerprint(graph)
+        result = _coloring_summary(
+            machine_name, coloring, merged_groups, fingerprint
+        )
+        coloring_results.append(result)
+        _write_json(
+            config.COLORED_GROUPED_RECIPES_DIR / source_path.name,
+            colored_recipes,
+        )
+        _print_coloring(result, abstract_group_map([metadata]))
+        logger.info(
+            "s5 color %s: colors=%d; largest_recipe_class=%d",
+            machine_name,
+            result.get("color_count", 0),
+            result.get("largest_recipe_class", 0),
+        )
+
+    _write_json(config.GROUPED_COLORING_FILE, coloring_results)
+    return len(coloring_results)
+
+
+def run_preprocess():
+    """Stage 1: execute the existing Raw -> Data preprocessing entrypoint."""
+
+    from s1_preprocess.split import main as split_main
+
+    saved_argv = sys.argv[:]
+    try:
+        sys.argv = [saved_argv[0]]
+        split_main()
+    finally:
+        sys.argv = saved_argv
+
+
+def _run_logged_stage(stage_name, log_path, runner):
+    _ensure_dir(Path(log_path).parent)
+    counter = configure_logging(Path(log_path))
+    count = runner()
+    print(
+        f"{stage_name} 完成：{count} 台机器；"
+        f"发现 {counter.count} 个问题。详细日志: {log_path}"
+    )
+
+
+def _formal_stage(stage):
+    if stage == "preprocess":
+        run_preprocess()
+    elif stage == "normalize":
+        _run_logged_stage(
+            "s2 normalize",
+            config.GROUPED_RECIPES_DIR / "grouping.log",
+            run_group_recipes,
+        )
+    elif stage == "cover":
+        _run_logged_stage(
+            "s3 cover",
+            config.FILTERED_GROUPED_RECIPES_DIR / "filter_grouped.log",
+            run_cover_grouped_recipes,
+        )
+    elif stage == "conflict":
+        _run_logged_stage(
+            "s4 conflict",
+            config.FILTERED_GROUPED_RECIPES_DIR / "conflict.log",
+            run_grouped_conflicts,
+        )
+    elif stage == "color":
+        _run_logged_stage(
+            "s5 color",
+            config.COLORED_GROUPED_RECIPES_DIR / "color.log",
+            run_grouped_color,
+        )
+    else:
+        raise ValueError(
+            "未知 stage；可用值: preprocess, normalize, cover, conflict, color, all"
+        )
+
+
+def main():
+    if "--legacy" in sys.argv:
+        force = "--rebuild" in sys.argv
+        issue_counter = configure_logging(config.LOG_FILE)
+        if force:
+            logger.info("检测到 --rebuild：强制重新生成旧链路 1/2")
+        cleaned_entries, regenerated_keys = run_clean_recipes(force)
+        filtered_machine_recipes, active_keys, abstract_groups = (
+            run_filter_recipes(cleaned_entries, regenerated_keys, force)
+        )
+        run_color_recipes(
+            filtered_machine_recipes, active_keys, abstract_groups
+        )
         print(
-            f"分组过滤完成：{filtered_count} 台机器；"
-            f"发现 {filter_counter.count} 个问题。"
-            f"详细日志: "
-            f"{config.FILTERED_GROUPED_RECIPES_DIR / 'filter_grouped.log'}"
+            f"旧链路处理完成，发现 {issue_counter.count} 个问题。"
+            f"详细日志: {config.LOG_FILE}"
         )
         return
 
-    # 兼容旧清洗/冲突图/着色链路。
-    force = "--rebuild" in sys.argv
-    issue_counter = configure_logging(config.LOG_FILE)
-    if force:
-        logger.info("检测到 --rebuild：强制重新生成 1/2")
-    cleaned_entries, regenerated_keys = run_clean_recipes(force)
-    filtered_machine_recipes, active_keys, abstract_groups = run_filter_recipes(
-        cleaned_entries, regenerated_keys, force
-    )
-    run_color_recipes(filtered_machine_recipes, active_keys, abstract_groups)
-    print(f"处理完成，发现 {issue_counter.count} 个问题。详细日志: {config.LOG_FILE}")
+    stage = None
+    if "--stage" in sys.argv:
+        index = sys.argv.index("--stage")
+        if index + 1 >= len(sys.argv):
+            raise SystemExit("--stage 需要参数")
+        stage = sys.argv[index + 1]
+
+    if stage == "all":
+        stages = ["preprocess", "normalize", "cover", "conflict", "color"]
+    elif stage is None:
+        stages = ["normalize", "cover", "conflict", "color"]
+    else:
+        stages = [stage]
+    for current_stage in stages:
+        _formal_stage(current_stage)
 
 
 if __name__ == "__main__":

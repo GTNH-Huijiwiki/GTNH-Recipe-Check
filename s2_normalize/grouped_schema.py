@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from Core.catalyst_group import (
+from s0_contracts.catalyst_group import (
     concrete_catalyst_groups as _concrete_catalyst_groups,
     group_signature as _catalyst_group_signature,
     normalize_recipe_catalyst_groups,

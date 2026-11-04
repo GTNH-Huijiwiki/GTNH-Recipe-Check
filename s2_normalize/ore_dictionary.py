@@ -3,7 +3,7 @@
 import logging
 import sys
 
-from Core.virtual_key import (
+from s2_normalize.virtual_key import (
     name_pair_of,
     split_virtual_key,
     virtual_key,

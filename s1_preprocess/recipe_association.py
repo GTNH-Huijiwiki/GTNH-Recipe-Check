@@ -1,7 +1,7 @@
 """配方物品关联：NBT 规范化、通配展开与缺失诊断。
 
 逻辑对应 GTNH-Chinese-Wiki-Toolchain/databaseDump/split_all.py 的
-_RecipeAssociations，供 scripts/split.py 在写出 Recipes 前调用。
+_RecipeAssociations，供 s1_preprocess/split.py 在写出 Recipes 前调用。
 """
 
 import csv

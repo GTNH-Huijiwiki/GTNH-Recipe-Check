@@ -8,7 +8,7 @@
 注意：原本「带催化剂但无编程电路」的组，置空后将等价于「无条件反应」空组。
 """
 
-from Core.grouped_schema import expand_catalyst_choices
+from s2_normalize.grouped_schema import expand_catalyst_choices
 
 
 def clean(recipes):

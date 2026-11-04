@@ -1,6 +1,6 @@
 """激光蚀刻机专属删减规则。"""
 
-from Core.grouped_schema import (
+from s2_normalize.grouped_schema import (
     expand_catalyst_choices,
     input_slot_count,
     remove_matching_input_items,

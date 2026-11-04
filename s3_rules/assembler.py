@@ -18,7 +18,7 @@
      （originalName 含 Cable）的配方：整条删除。
 """
 
-from Core.grouped_schema import (
+from s2_normalize.grouped_schema import (
     expand_catalyst_choices,
     remove_variants_where_all_inputs_match,
 )

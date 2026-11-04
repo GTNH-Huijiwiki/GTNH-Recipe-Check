@@ -5,7 +5,7 @@ import random
 from collections import Counter
 from copy import deepcopy
 
-from Core.recipe_checker import (
+from s0_contracts.recipe import (
     group_output_order_key,
     group_signature,
     item_signature,

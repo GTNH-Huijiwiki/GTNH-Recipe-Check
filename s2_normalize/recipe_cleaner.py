@@ -3,7 +3,7 @@
 import re
 from itertools import product
 
-from Core.ore_dictionary import expand_ore_catalysts
+from s2_normalize.ore_dictionary import expand_ore_catalysts
 
 
 def _item_options(item):

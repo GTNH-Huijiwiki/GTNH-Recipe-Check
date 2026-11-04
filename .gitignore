@@ -3,14 +3,20 @@
 !README.md
 !main.py
 !config.py
-!Core/
-!Core/**
-!Rules/
-!Rules/**
-!scripts/
-!scripts/**
-!tests/
-!tests/**
+!s0_contracts/
+!s0_contracts/**
+!s1_preprocess/
+!s1_preprocess/**
+!s2_normalize/
+!s2_normalize/**
+!s3_rules/
+!s3_rules/**
+!s4_cover/
+!s4_cover/**
+!s5_conflict/
+!s5_conflict/**
+!s6_color/
+!s6_color/**
 
 # 白名单目录内仍需排除的构建产物
 __pycache__/

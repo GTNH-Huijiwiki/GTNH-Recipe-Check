@@ -20,29 +20,31 @@ INTERESTED_MACHINES = {
     "press",
 }
 
-# 输出根目录
+# 输出根目录；每个数据版本单独一个子目录
 OUTPUT_ROOT = Path("Output")
+OUTPUT_VERSION = DATA_SPLIT_DIR.name
+VERSIONED_OUTPUT_ROOT = OUTPUT_ROOT / OUTPUT_VERSION
 
 # 运行日志
-LOG_FILE = OUTPUT_ROOT / "recipe_check.log"
+LOG_FILE = VERSIONED_OUTPUT_ROOT / "recipe_check.log"
 
-# 1 清洗产物目录
-CLEANED_RECIPES_DIR = OUTPUT_ROOT / "cleaned_recipes"
+# 旧链路：1 清洗产物目录
+CLEANED_RECIPES_DIR = VERSIONED_OUTPUT_ROOT / "cleaned_recipes"
 
-# 2 过滤产物目录
-FILTERED_RECIPES_DIR = OUTPUT_ROOT / "filtered_recipes"
+# 旧链路：2 过滤产物目录
+FILTERED_RECIPES_DIR = VERSIONED_OUTPUT_ROOT / "filtered_recipes"
 
 # 0 组/无条件配方单向串配方全量报告（分析层使用虚拟无条件组）
 EMPTY_CONFLICT_FILE = FILTERED_RECIPES_DIR / "empty_group_conflicts.json"
 
 # 3 着色产物目录
-COLORED_RECIPES_DIR = OUTPUT_ROOT / "colored_recipes"
+COLORED_RECIPES_DIR = VERSIONED_OUTPUT_ROOT / "colored_recipes"
 
 # 1 阶段等效输入组产物目录（独立于现有冲突检查下游）
-GROUPED_RECIPES_DIR = OUTPUT_ROOT / "grouped_recipes"
+GROUPED_RECIPES_DIR = VERSIONED_OUTPUT_ROOT / "grouped_recipes"
 
 # 基于分组配方执行 Rules + 最小催化组覆盖的产物目录
-FILTERED_GROUPED_RECIPES_DIR = OUTPUT_ROOT / "filtered_grouped_recipes"
+FILTERED_GROUPED_RECIPES_DIR = VERSIONED_OUTPUT_ROOT / "filtered_grouped_recipes"
 
 # 催化组关系报告与纯包含链清单
 CATALYST_RELATION_REPORT = (
@@ -57,7 +59,7 @@ GROUPED_EMPTY_CONFLICT_FILE = (
 )
 
 # 正式分组链路的最终着色产物
-COLORED_GROUPED_RECIPES_DIR = OUTPUT_ROOT / "colored_grouped_recipes"
+COLORED_GROUPED_RECIPES_DIR = VERSIONED_OUTPUT_ROOT / "colored_grouped_recipes"
 GROUPED_COLORING_FILE = COLORED_GROUPED_RECIPES_DIR / "coloring.json"
 
 # 孤儿标记偏好：contains | only（两种 flag 始终记录，仅用于下游选择）
@@ -78,5 +80,5 @@ COLOR_CLASS_SIZE_SWEEP = True
 COLOR_CLASS_SIZE_SWEEP_MAX = 12
 
 # 0 组/无条件配方与其它催化组的串配方检查是否在终端显示；
-# 关闭（默认）时只在 Output/recipe_check.log 中以 DEBUG 级别记录，不刷屏终端。
+# 关闭（默认）时只在 Output/<version>/recipe_check.log 中以 DEBUG 级别记录，不刷屏终端。
 LOG_EMPTY_CONFLICT_CONSOLE = False

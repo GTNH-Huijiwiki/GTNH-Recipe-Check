@@ -25,6 +25,23 @@ def classify_relation(left_coverage, right_coverage):
     return "disjoint"
 
 
+def abstract_group_map(reduction_metadata):
+    """Build abstract catalyst key -> original group members mapping."""
+
+    abstract_groups = {}
+    for machine in reduction_metadata:
+        for component in machine.get("components", []):
+            for equivalent in component.get("equivalent_groups", []):
+                replacement = equivalent.get("replacement") or {}
+                members = replacement.get("members") or equivalent.get("members", [])
+                replacement_key = replacement.get("key", "") or replacement.get(
+                    "originalName", ""
+                )
+                if replacement_key and members:
+                    abstract_groups[replacement_key] = members
+    return abstract_groups
+
+
 def pure_containment_chains(metadata):
     """List bottom-to-root strict-subset chains ending at top-level classes.
 

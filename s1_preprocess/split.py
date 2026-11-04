@@ -18,11 +18,11 @@ split.py
     nbt_missing.csv         (Recipes NBT 未匹配清单，中间产物，仅缺失时生成)
 
 用法（在仓库根目录运行）：
-    python scripts/split.py                # items + oredict + recipes（同一进程内依次执行）
-    python scripts/split.py items          # 仅 Items
-    python scripts/split.py oredict        # 仅 OreDictionary
-    python scripts/split.py recipes        # 仅 Recipes（独立运行无法做 NBT key 解析，见下）
-    python scripts/split.py items recipes  # 多个子步骤（items 必须先于 recipes）
+    python -m s1_preprocess.split                # items + oredict + recipes（同一进程内依次执行）
+    python -m s1_preprocess.split items          # 仅 Items
+    python -m s1_preprocess.split oredict        # 仅 OreDictionary
+    python -m s1_preprocess.split recipes        # 仅 Recipes（独立运行无法做 NBT key 解析，见下）
+    python -m s1_preprocess.split items recipes  # 多个子步骤（items 必须先于 recipes）
 
 Items 落盘只保留 key/originalName/translatedName；Recipes 的 NBT key 解析依赖完整
 item 信息（rawKey/nbt），因此只有同一进程内先执行过 items 时才可解析。
@@ -37,7 +37,7 @@ import sys
 # 让进度输出实时刷新
 sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, "reconfigure") else None
 
-# 无论以脚本方式还是 `python -m scripts.split` 运行，都保证能 import 到仓库根的 config.py。
+# 无论以脚本方式还是 `python -m s1_preprocess.split` 运行，都保证能 import 到仓库根的 config.py。
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 if _PROJECT_ROOT not in sys.path:
@@ -46,8 +46,8 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 import config  # noqa: E402  —— 项目根目录集中配置
-from recipe_association import RecipeAssociations  # noqa: E402
-from recipe_roles import normalize_recipe_roles  # noqa: E402
+from s1_preprocess.recipe_association import RecipeAssociations  # noqa: E402
+from s1_preprocess.recipe_roles import normalize_recipe_roles  # noqa: E402
 
 _FORMAT_CODE_RE = re.compile(r"§.")
 
