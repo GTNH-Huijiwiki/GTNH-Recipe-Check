@@ -26,7 +26,7 @@
 
 ```
 GTNH-Recipe-Check/
-├── main.py                       # 主流程入口（1 清洗 → 2 删减 → 3 冲突图/着色）
+├── main.py                       # 正式主流程（分组 → Rules → 最小催化组覆盖；--legacy 保留旧链路）
 ├── config.py                     # 集中配置（数据目录、机器白名单、输出与着色参数）
 ├── README.md
 ├── Core/                         # 通用核心逻辑（库，与具体机器无关）
@@ -35,7 +35,11 @@ GTNH-Recipe-Check/
 │   ├── ore_dictionary.py         # 1：# 矿辞典与 :32767 通配展开（同名折叠为虚拟 key）
 │   ├── virtual_key.py            # 虚拟 key 的生成 / 识别 / 还原（同名不同 key 归一身份）
 │   ├── translator.py             # 1：key → originalName / translatedName（保留 key）
-│   ├── catalyst_reducer.py       # 2：按覆盖关系删减催化组（等价类 → 抽象催化剂）
+│   ├── catalyst_group.py         # 唯一催化组 schema：0+ 组、每组催化物集合 + 电路板
+│   ├── catalyst_reducer.py       # 2：关系划分 + 精确最小催化组覆盖
+│   ├── catalyst_relations.py     # 覆盖关系规范、纯包含链与 Markdown 报告
+│   ├── grouped_schema.py         # 分组 schema：catalystChoices 展开、inputGroups 规则剪枝
+│   ├── set_cover.py              # 精确最小集合覆盖（分支定界）
 │   ├── recipe_checker.py         # 3：签名、串配方方向判定、冲突图构建、可读标签
 │   ├── graph_coloring.py         # 3：多轮随机化 DSATUR 贪心着色 + 催化组合并
 │   ├── manual_conflict_checker.py # manual_check.py 的解析 / 判定 / 报告核心
@@ -48,7 +52,6 @@ GTNH-Recipe-Check/
 │   └── press.py                  # 冲压机床
 ├── scripts/
 │   ├── split.py                  # 数据准备：Dumper 导出 → Data/<版本>/
-│   ├── group_recipes.py          # 1 阶段等效输入组（独立入口）
 │   ├── nbt_identity.py           # split 用 SNBT 规范化
 │   ├── recipe_association.py     # split 用 NBT / :32767 通配归一化与诊断
 │   └── recipe_roles.py           # split 用 otherItems 角色归类
@@ -103,42 +106,87 @@ python scripts/split.py items recipes  # 多个子步骤（items 必须先于 re
 ### 什么时候跑 main
 
 ```bash
-python main.py             # 增量：已有产物直接复用，仅重算缺失/受影响的机器
-python main.py --rebuild   # 强制重算 1 清洗与 2 删减
+python main.py               # 正式链路：分组 → Rules 过滤 → 最小催化组覆盖
+python main.py --legacy      # 兼容旧链路：清洗 → 过滤 → 冲突图/着色
+python main.py --legacy --rebuild  # 强制重算旧链路的清洗与过滤
 ```
 
 选择依据：
 
 | 你改了什么 | 命令 |
 |---|---|
-| `Rules/*.py`（机器规则）、`Core/recipe_cleaner.py`、`Core/ore_dictionary.py`、翻译/清洗逻辑 | `python main.py --rebuild`（否则会复用旧的清洗产物） |
-| `config.INTERESTED_MACHINES` 新增机器 | `python main.py`（新机器无产物，会自动重算） |
-| `COLORING_ROUNDS` / `COLOR_CLASS_MAX_SIZE`，或只想换一版着色方案 | `python main.py`（3 每次都会重跑，只保留历史最优） |
-| 数据本身（先跑过 `split.py`） | `python main.py --rebuild` |
+| `Rules/*.py`、分组或最小覆盖逻辑 | `python main.py` |
+| `config.INTERESTED_MACHINES`、分组参数 | `python main.py` |
+| 旧清洗 / 冲突图 / 着色链路 | `python main.py --legacy` |
+| 数据本身（先跑过 `split.py`） | `python main.py` |
 
-> 3（冲突图与着色）每次运行都会重算，但**跨次运行只保留最优方案**（图未变时若历史更优则沿用）；1/2 默认复用 `Output/` 中已有产物。聚合文件（`index.json` / `catalyst_reduction.json` / `conflict_graph.json` / `coloring.json`）按机器**合并更新**：剔除本次机器的旧条目后追加新条目，未列入白名单的机器旧产物不受影响。
+> 正式链路默认每次重新生成 `grouped_recipes` 和 `filtered_grouped_recipes`。旧链路仍保留增量复用与 `--rebuild` 行为。
 
-### 1 阶段等效输入组（实验入口）
+### 正式分组与过滤
 
-`python main.py` 目前仍走旧的 `Core/recipe_cleaner.py`；新的等效输入组合并在独立入口验证：
+`main.py` 直接完成：
 
-```bash
-python scripts/group_recipes.py              # INTERESTED_MACHINES 全部
-python scripts/group_recipes.py press        # 指定机器
-```
+1. 从 `DATA_DIR/Recipes` 读取机器配方；
+2. 构建 `Output/grouped_recipes`；
+3. 在分组配方上直接执行 `Rules/*.clean`；
+4. 执行关系划分与精确最小催化组覆盖，生成 `Output/filtered_grouped_recipes`。
 
-- 输出：`Output/grouped_recipes/<machine>.json`（顶层为配方列表，与 `cleaned_recipes` 对标）、`index.json`、`orphan_report.json`、`grouping.log`
+`scripts/` 只负责 `Raw -> Data`，不再承载分组或过滤流程。
+
+- 输出：`Output/grouped_recipes/<machine>.json`、`index.json`、`orphan_report.json`、`grouping.log`
 - 配方核心字段与 `cleaned_recipes` 一致：`inputItems` / `inputFluids` / `outputItems` / `outputFluids` / `catalystGroups`；新增 `inputGroups`
-- 固定催化剂保持扁平 item；候选催化剂放在 `catalystGroups[].catalystChoices`
+- 催化组使用唯一规范结构：`{"catalysts": [...], "circuit": {...} | null}`
+- 每条配方可拥有 0、1、2 或更多个催化组；0 组表示无条件，不存显式空组
+- 候选催化剂在分组阶段展开为多个具体催化组，下游不再出现 `catalystChoices`
 - 输入侧 `#` / `:32767` 先展开成组，每组只包含同类型（item / fluid）
 - 所有输入槽统一为 slot：固定项、组、催化剂；恰好一个 slot 不同且输出相同的配方会迭代合并
 - 报警同时输出到终端和日志，配方带 `alerts` / `needsReview`，不中断
 - 规范化结果只保留输入/输出/催化剂；原始 `eut` / `duration` / `metadata` / `specialValue` / `sourceMod` / `nbtSensitive` 全部丢弃
 - 仅额外保留分析字段 `alerts` / `needsReview` / `orphan`
 - 孤儿只在最终合并后的配方上标记，不删除；只统计输入，不统计输出和催化剂
-- 该产物尚未接入 `main.py` 的 Rules / 冲突检查下游
+- 输出：`Output/filtered_grouped_recipes/<machine>.json`、`index.json`、`catalyst_reduction.json`、`filter_grouped.log`
+- Rules 兼容 `inputGroups`：命中“包含某物品”时只删除该候选成员，命中“输入全为某物品”时只删除对应组合，不会误删同一分组配方中的其它合法变体
+- 候选催化槽先按笛卡尔积展开成具体催化组；一个含多个催化剂的组始终作为完整触发条件参与覆盖，并自然覆盖其催化剂子集
+- 分组输入侧的 `inputGroups` 保留在输出中，供后续冲突图继续按槽位语义处理
 
-配方字段：与 cleaned 对齐的 `inputItems` / `inputFluids` / `outputItems` / `outputFluids` / `catalystGroups`；新增 `inputGroups`；`catalystGroups[].catalystChoices` 表示候选催化剂；分析字段 `alerts`、`needsReview`、`orphan`。
+配方字段：与 cleaned 对齐的 `inputItems` / `inputFluids` / `outputItems` / `outputFluids` / `catalystGroups`；新增 `inputGroups`。`catalystGroups` 始终是规范组列表，可为空；每项仅含 `catalysts` 与 `circuit`。分析字段 `alerts`、`needsReview`、`orphan`。
+
+### 催化组覆盖关系、纯包含链与根组合并
+
+对任意两个催化组，以其配方覆盖集合 `Recipes(A)` / `Recipes(B)` 定义五种规范关系：
+
+| `relation` | 数学定义 |
+|---|---|
+| `equivalent` | `Recipes(A) == Recipes(B)` |
+| `strict_subset` | `Recipes(A) ⊂ Recipes(B)` |
+| `strict_superset` | `Recipes(A) ⊃ Recipes(B)` |
+| `intersect` | 交集非空，但互不包含 |
+| `disjoint` | 交集为空 |
+
+正式输出：
+
+- `Output/filtered_grouped_recipes/catalyst_relations.json`：原始组、等价类、五类关系和覆盖集合；
+- `Output/filtered_grouped_recipes/catalyst_containments.md`：只沿 `strict_subset` 边枚举“最底层组 → 最顶层根组”的纯包含链，相交关系不参与；
+- `Output/filtered_grouped_recipes/catalyst_reduction.json`：记录关系分量、顶层候选、纯包含链和最终最小覆盖。
+
+不进行“共享催化剂根组强制合并”。组装机在 Rules 阶段按 `originalName` 模糊识别战利品（不区分大小写包含 `trophy`），移除“战利品 + 任意编程电路”的催化组；若配方所有催化组都被移除，则整条配方删除。
+
+### 冲突图构建优化
+
+正式链路在过滤与最小覆盖之后构建冲突图：
+
+- **orphan 目标剪枝**：若目标配方的任一输入槽所有成员都是 orphan，则其它配方不可能提供该槽，目标不参与入边搜索；
+- **bitset 候选召回**：为每个输入 key 预计算可提供它的配方 bitset，按目标槽求交，避免 O(R²) 全量两两比较；
+- **输入组槽位匹配**：固定输入视为单成员槽，`inputGroups` 视为 OR 槽；候选源通过二分匹配确认不同目标槽不会争用同一个源组槽；
+- **稀疏组间边**：内部使用边集合去重，最终再生成兼容着色的 `adjacency_matrix`；
+- **0 组配方语义**：配方数据保持 `catalystGroups: []`；冲突分析层临时映射为虚拟无条件组，只用于冲突检测，不回写配方；orphan 无条件配方不会成为被触发目标。
+
+输出：
+
+- `Output/filtered_grouped_recipes/conflict_graph.json`
+- `Output/filtered_grouped_recipes/empty_group_conflicts.json`
+
+图中额外记录 `build_stats`：活动配方数、有效目标数、orphan 剪枝数、候选配方对、确认配方对、边数和自冲突数。
 
 ---
 
@@ -146,9 +194,10 @@ python scripts/group_recipes.py press        # 指定机器
 
 | 参数 | 说明 |
 |---|---|
-| `--rebuild` | 强制重新生成 1（清洗/翻译）与 2（规则删减/催化组删减），忽略已有产物。不加则复用已有清洗与过滤文件。 |
+| `--legacy` | 运行旧的 `cleaned_recipes → filtered_recipes → colored_recipes` 链路。 |
+| `--rebuild` | 仅与 `--legacy` 配合，强制重新生成旧链路的清洗与过滤产物。 |
 
-除 `--rebuild` 外没有其它命令行参数，其余行为全部由 `config.py` 控制。
+正式链路不需要额外参数；其余行为由 `config.py` 控制。
 
 ---
 
@@ -165,7 +214,12 @@ python scripts/group_recipes.py press        # 指定机器
 | `CLEANED_RECIPES_DIR` | 1 清洗产物目录 | `Output/cleaned_recipes` |
 | `FILTERED_RECIPES_DIR` | 2 过滤产物目录 | `Output/filtered_recipes` |
 | `COLORED_RECIPES_DIR` | 3 着色产物目录 | `Output/colored_recipes` |
-| `GROUPED_RECIPES_DIR` | 1 阶段等效输入组独立产物目录 | `Output/grouped_recipes` |
+| `GROUPED_RECIPES_DIR` | 正式主流程的等效输入分组产物目录 | `Output/grouped_recipes` |
+| `FILTERED_GROUPED_RECIPES_DIR` | 分组配方规则过滤 + 最小催化组覆盖产物目录 | `Output/filtered_grouped_recipes` |
+| `CATALYST_RELATION_REPORT` | 催化组关系规范 JSON | `Output/filtered_grouped_recipes/catalyst_relations.json` |
+| `CATALYST_CONTAINMENT_REPORT` | 纯包含链 Markdown 报告 | `Output/filtered_grouped_recipes/catalyst_containments.md` |
+| `GROUPED_CONFLICT_FILE` | 分组链路冲突图 | `Output/filtered_grouped_recipes/conflict_graph.json` |
+| `GROUPED_EMPTY_CONFLICT_FILE` | 分组链路空组冲突全量报告 | `Output/filtered_grouped_recipes/empty_group_conflicts.json` |
 | `GROUP_ORPHAN_MODE` | 孤儿标记偏好：`contains` / `only`（两种 flag 始终记录，不删除配方） | `contains` |
 | `COLORING_ROUNDS` | 冲突图着色每个「单色类最大节点数」档位的随机探索轮数，越大越可能找到更优解 | `128` |
 | `COLOR_CLASS_MAX_SIZE` | 单个颜色类允许的最大节点数；`None` 表示不限制 | `None` |
@@ -173,7 +227,7 @@ python scripts/group_recipes.py press        # 指定机器
 | `COLOR_CLASS_SIZE_SWEEP_MAX` | 逐 1 扫描的最大档位（从 2 起）；`None` 表示扫到 `COLOR_CLASS_MAX_SIZE` 或节点数 | `12` |
 | `LOG_EMPTY_CONFLICT_CONSOLE` | 空催化组（编程电路0）与其它催化组的串配方单向检查是否在终端显示；`False` 时只在日志文件中记录 | `False` |
 
-白名单中的机器若在 `Recipes/` 下所有来源目录都找不到，程序会**报错停止**。
+正式链路中，白名单机器若找不到配方文件会记录警告并跳过；旧 `--legacy` 链路会报错停止。
 
 `:32767` 通配在 split 阶段按物品真实变体展开，并在 `association_report.json` / `oredictionary_associations.json` 中记录无候选项；`Core/ore_dictionary.py` 的 `EXPAND_WILDCARD_32767` 仅作为下游兜底开关。
 
@@ -184,12 +238,14 @@ python scripts/group_recipes.py press        # 指定机器
 ```mermaid
 flowchart LR
     A["Dumper 导出<br/>(DUMPER_DIR)"] -->|scripts/split.py| B["Data/&lt;版本&gt;<br/>Items / OreDictionary / Recipes"]
-    B -->|main.py 1| C["cleaned_recipes<br/>清洗 + 等效合并 + 翻译"]
-    B -->|scripts/group_recipes.py| H["grouped_recipes<br/>1 阶段等效输入组"]
-    C -->|2 Rules/*.clean| D["规则删减后"]
-    D -->|2 reduce_catalyst_groups| E["filtered_recipes<br/>催化组删减"]
-    E -->|3.1 build_conflict_graph| F["conflict_graph"]
-    F -->|3.2 color_graph + apply_coloring| G["colored_recipes<br/>最终催化组划分"]
+    B -->|main.py 1| H["grouped_recipes<br/>等效输入分组"]
+    H -->|main.py 2<br/>Rules + 最小覆盖| I["filtered_grouped_recipes"]
+    I -->|main.py 3<br/>orphan + bitset + slot match| J["conflict_graph.json"]
+    B -->|main.py --legacy| C["cleaned_recipes<br/>旧清洗 + 翻译"]
+    C -->|Rules/*.clean| D["规则删减后"]
+    D -->|reduce_catalyst_groups| E["filtered_recipes"]
+    E -->|build_conflict_graph| F["conflict_graph"]
+    F -->|color_graph + apply_coloring| G["colored_recipes<br/>旧着色链路"]
 ```
 
 ---
@@ -210,8 +266,15 @@ flowchart LR
 | `Output/colored_recipes/coloring.json` | 着色方案汇总（最优轮次 `best_round`、颜色、节点归属、合并后催化组、各组覆盖配方数降序 `recipe_class_sizes`；`colors` 按输出组序排列） |
 | `Output/grouped_recipes/{machine}.json` | 1 阶段等效输入组结果（`inputGroups` / `catalystGroups` / `alerts` / `orphan`） |
 | `Output/grouped_recipes/index.json` | 分组结果索引与统计 |
+| `Output/grouped_recipes/grouping.log` | 分组阶段日志 |
+| `Output/filtered_grouped_recipes/filter_grouped.log` | 分组配方 Rules 与最小覆盖日志 |
+| `Output/filtered_grouped_recipes/{machine}.json` | 分组配方经 Rules 过滤、催化组最小覆盖后的配方（保留 `inputGroups` 和规范 `catalystGroups`） |
+| `Output/filtered_grouped_recipes/catalyst_reduction.json` | 分组链路的关系分量、等价组、顶层候选、精确集合覆盖统计与最优性标记 |
+| `Output/filtered_grouped_recipes/catalyst_relations.json` | 催化组覆盖关系规范：原始组、等价类、五类关系与覆盖规模 |
+| `Output/filtered_grouped_recipes/catalyst_containments.md` | 最底层等价类到最顶层根组的纯包含链清单 |
+| `Output/filtered_grouped_recipes/conflict_graph.json` | 分组输入感知的冲突图；含稀疏边、邻接矩阵与 `build_stats` |
+| `Output/filtered_grouped_recipes/empty_group_conflicts.json` | 空催化组单向冲突全量报告 |
 | `Output/grouped_recipes/orphan_report.json` | 各机器孤儿标记汇总 |
-| `Output/grouped_recipes/grouping.log` | 分组报警日志 |
 
 ---
 
@@ -221,7 +284,7 @@ flowchart LR
 
 已注册规则：
 
-- `assembler.py`（组装机）：删除输入仅为`Volumetric Flask` 的配方；按目标催化组删除或裁剪分组；删除「催化组含编程电路 24 且输出物品全为 Cable」的配方。
+- `assembler.py`（组装机）：删除输入仅为 `Volumetric Flask` 的配方；按 `originalName` 模糊识别并移除“战利品 + 任意编程电路”的催化组；移除“远程请求器 + 编程电路18”的催化组；删除「催化组含编程电路 24 且输出物品全为 Cable」的配方。
 - `fluidchemicaleactor.py`（化工厂）：把每个催化组的催化剂部分置空，只保留编程电路。
 - `laserengraver.py`（激光蚀刻机）：删除若干特定输入/输出形状的配方。
 - `press.py`（冲压机床）：删除输出物品全部为 `Extruder Shape`（模头）或全部为 `Mold`（模具）的复制型配方；删除普通输入中含 `originalName` 严格为 `Dough`（面团）的配方。
@@ -295,20 +358,24 @@ $$ Recipes(G) = \bigcup_{\emptyset \neq S \subseteq G} Recipes(S) $$
   - **包含**：$Recipes(A) \supseteq Recipes(B)$；
   - **等价**：$Recipes(A) = Recipes(B)$；
   - **相交**：交集非空且既非包含也非等价。
-  将存在上述关系的催化组归入同一**关系分量**；对每个分量取顶层催化组作为候选（等价类用**抽象催化剂**取代，并在 `catalyst_reduction.json` 记录还原信息），再贪心选取覆盖全部配方的候选集合。
+  将存在上述关系的催化组归入同一**关系分量**；对每个分量先归并覆盖集合相同的**等价类**（用**抽象催化剂**取代，并在 `catalyst_reduction.json` 记录还原信息），再剔除被严格包含的支配候选，最后对剩余顶层候选做**精确最小集合覆盖**（分支定界；贪心只用于提供上界）。输出元数据中的 `set_cover.optimal` 表示该次覆盖是否已证明最优。
 
-> 交叉关系的选择可能不唯一，程序只给出其中一个方案。
+> 多催化剂催化组是一个完整触发集合：例如 `A+B` 组会覆盖只要求 `A`、只要求 `B` 或同时要求 `A+B` 的配方子集，但不会覆盖空催化组。
+>
+> 最小覆盖的解可能不唯一；程序在最少组数下使用稳定排序打破并列。
 
 ### 3. 冲突图与着色
 
 1. **构建冲突图**（`build_conflict_graph`）：
    - 节点 = 候选催化组（按 `group_signature` 去重）；边 = 会被同一缓存同时触发、且构成串配方的两组。
-   - **方向判定**：对两个配方（及其各自催化组）分别检查 `左→右`、`右→左`。以 `key` 为身份、忽略数量。
-     因为催化剂/电路属于独立类型、不会替代材料输入，判定可化简为材料输入集合的包含关系：
-     `左→右 ⇔ 输入(右) ⊆ 输入(左)`，`右→左` 对称。
+   - **方向判定**：对两个配方分别检查 `左→右`、`右→左`。以 `key` 为身份、忽略数量：
+     `左→右 ⇔ 右配方的全部输入槽可由左配方输入槽匹配`。
+   - **输入组槽位匹配**：固定输入是单成员槽，`inputGroups` 是 OR 槽；每个目标槽必须匹配不同的源槽，避免两个目标槽同时消费同一个源组槽。
+   - **orphan 目标剪枝**：目标配方任一输入槽全部为 orphan 输入时，其它配方不可能提供该槽，直接跳过该目标。
+   - **bitset 候选召回**：按输入 key 预计算可提供该 key 的配方 bitset，对目标槽求交得到候选源，最后再做精确槽位匹配。
    - **输出相等豁免**：若两配方输出（物品+流体，忽略数量）**完全相同**，则即使输入构成包含也视为良性连带，不判为串配方（不记自冲突、不连边）。
    - **自冲突**：落在同一催化组内、且构成串配方的非等效配方对，记入日志（无法靠分组解决）。
-   - **空催化组（编程电路0）单向全量检查**：空催化组无任何触发条件，只统计「其它组配方 → 空组配方」这一个方向，即空组配方的材料输入 ⊆ 其它组配方的材料输入（做其它催化组配方时会连带触发空组配方）；反向（做空组配方连带触发对方）不统计。判定对全部配方对做全量枚举，按「空组 × 对方组」汇总：**全量逐对结果写入 `Output/filtered_recipes/empty_group_conflicts.json`**（每对含 `recipeId`、输入输出摘要、两个催化组及其配方数；`conflict_graph.json` 的 `empty_group_conflict_counts` 只保留计数）。`recipe_check.log` 只列每对组的示例（`_EMPTY_CONFLICT_SAMPLE_LIMIT`，默认 3 条）并标注从略条数；报告始终写入日志，是否在终端显示由 `config.LOG_EMPTY_CONFLICT_CONSOLE` 控制（默认 `False`，只写日志）。
+   - **0 组/无条件配方单向全量检查**：分析层只统计「其它组配方 → 无条件配方」方向；orphan 无条件配方不会成为被触发目标。全量报告写入正式链路的 `Output/filtered_grouped_recipes/empty_group_conflicts.json`（旧链仍写 `Output/filtered_recipes/empty_group_conflicts.json`），`conflict_graph.json` 的 `empty_group_conflict_counts` 只保留计数。
 2. **着色**（`color_graph` + `apply_coloring`）：
    - 相邻节点必须不同色（即冲突的催化组不能共处同一缓存）；
    - 同色节点合并为一个新催化组；
@@ -324,8 +391,8 @@ $$ Recipes(G) = \bigcup_{\emptyset \neq S \subseteq G} Recipes(S) $$
 
 ## 常见问题
 
-- **改了 `Rules/` 但结果没变**：1/2 默认复用已有产物，需要 `python main.py --rebuild`。
+- **改了 `Rules/` 但结果没变**：正式链路会重新计算；只有旧链路需要 `python main.py --legacy --rebuild`。
 - **只想更新部分机器**：把目标机器放入白名单即可，未列入的机器旧产物不受影响。
 - **想新增某台机器的删减规则**：在 `Rules/<机器>.py` 实现 `clean` 并到 `Rules/registry.py` 注册。
-- **想换一版着色方案**：调整 `COLORING_ROUNDS`（或 `COLOR_CLASS_MAX_SIZE`）后重跑 `main.py`；3 每次都会重算，且只保留历史最优。
+- **想换一版旧着色方案**：调整 `COLORING_ROUNDS`（或 `COLOR_CLASS_MAX_SIZE`）后运行 `python main.py --legacy`；旧着色链路每次都会重算，且只保留历史最优。
 - **展示/日志乱码（Windows）**：控制台重定向可能因 GBK 无法输出中文与特殊符号，可改用 `python -X utf8 ...` 或先执行 `chcp 65001`。

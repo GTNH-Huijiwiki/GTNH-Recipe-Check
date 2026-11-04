@@ -3,7 +3,6 @@
 import logging
 from collections import Counter
 from copy import deepcopy
-from itertools import combinations
 
 logger = logging.getLogger(__name__)
 
@@ -17,8 +16,12 @@ def group_signature(group):
     catalysts = tuple(
         sorted(item_signature(item) for item in group.get("catalysts", []))
     )
+    choices = tuple(
+        tuple(sorted(item_signature(item) for item in choice.get("members", [])))
+        for choice in group.get("catalystChoices", []) or []
+    )
     circuit = group.get("circuit") or {}
-    return catalysts, item_signature(circuit) if circuit else None
+    return catalysts, choices, item_signature(circuit) if circuit else None
 
 
 def _display_name(item):
@@ -278,6 +281,90 @@ def _recipe_output_keys(recipe):
     return frozenset(keys)
 
 
+def _recipe_input_slots(recipe):
+    """Return material input slots as OR sets of (kind, key).
+
+    Fixed items/fluids become singleton slots.  Every inputGroups entry becomes
+    one multi-member slot; quantities and display names are ignored.
+    """
+
+    slots = []
+    seen = set()
+    for kind, field in (("item", "inputItems"), ("fluid", "inputFluids")):
+        for item in recipe.get(field, []):
+            slot = frozenset({(kind, _condition_key(item))})
+            if slot not in seen:
+                seen.add(slot)
+                slots.append(slot)
+    for group in recipe.get("inputGroups", []) or []:
+        kind = group.get("kind")
+        members = frozenset(
+            (kind, _condition_key(member))
+            for member in group.get("members", []) or []
+        )
+        if members and members not in seen:
+            seen.add(members)
+            slots.append(members)
+    return tuple(slots)
+
+
+def _has_orphan_input(recipe):
+    return bool((recipe.get("orphan") or {}).get("hasOrphanInput"))
+
+
+def _slots_can_match(source_slots, target_slots):
+    """Whether all target demand slots can consume distinct source slots.
+
+    Slots are OR sets.  A target slot is satisfied by a source slot when their
+    member sets intersect.  This prevents two target groups from incorrectly
+    consuming different members of the same source group at once.
+    """
+
+    if len(target_slots) > len(source_slots):
+        return False
+    if not target_slots:
+        return True
+
+    adjacency = []
+    for demand in target_slots:
+        options = [
+            index
+            for index, supply in enumerate(source_slots)
+            if demand & supply
+        ]
+        if not options:
+            return False
+        adjacency.append(options)
+
+    matched_demand = [-1] * len(source_slots)
+
+    def augment(demand_index, visited):
+        for supply_index in adjacency[demand_index]:
+            if supply_index in visited:
+                continue
+            visited.add(supply_index)
+            previous = matched_demand[supply_index]
+            if previous == -1 or augment(previous, visited):
+                matched_demand[supply_index] = demand_index
+                return True
+        return False
+
+    # Match the most constrained target slots first.
+    for demand_index in sorted(range(len(adjacency)), key=lambda index: len(adjacency[index])):
+        if not augment(demand_index, set()):
+            return False
+    return True
+
+
+def recipe_can_trigger(source_recipe, target_recipe):
+    """Whether executing source also satisfies target's material inputs."""
+
+    return _slots_can_match(
+        _recipe_input_slots(source_recipe),
+        _recipe_input_slots(target_recipe),
+    )
+
+
 # 单向检查说明：其它催化组配方执行时，空组配方会被连带触发
 _EMPTY_CONFLICT_DIRECTION_TEXT = (
     "其它组配方 → 编程电路0（做其它催化组配方会连带触发空催化组配方）"
@@ -288,8 +375,12 @@ _EMPTY_CONFLICT_SAMPLE_LIMIT = 3
 
 
 def _is_empty_group(group):
-    """是否为空催化组（无催化剂、无编程电路），即无条件反应的「编程电路0」。"""
-    return (not group.get("catalysts")) and (not group.get("circuit"))
+    """是否为空催化组（无催化剂、无编码电路），即无条件反应的「编程电路0」。"""
+    return (
+        not group.get("catalysts")
+        and not group.get("catalystChoices")
+        and not group.get("circuit")
+    )
 
 
 def _empty_group_triggered_by_other(empty_keys, other_keys):
@@ -430,30 +521,28 @@ def build_conflict_graph(
     machine_name, recipes, abstract_groups=None, empty_conflict_console=False,
     empty_conflict_report=None,
 ):
-    """构建催化组冲突图，并把自冲突、空催化组串配方写入日志。
+    """Build the catalyst-group conflict graph from grouped recipes.
 
-    节点 = 去重后的催化组；边 = 会被同一缓存同时触发、且构成串配方的两组。
+    Candidate discovery uses orphan-aware bitsets over material input slots.
+    Each target recipe slot is an OR-set; candidate sources are intersected by
+    their ability to supply at least one member.  A final bipartite slot match
+    confirms that different target slots do not consume the same source group.
 
-    冲突方向判定只依赖材料输入（item/fluid）集合的包含关系：催化剂/电路属于
-    独立类型，不会替代材料输入，故「输入互相包含 ⇔ 存在串配方方向」。据此用
-    「输入集合 → 配方」子集索引枚举互相包含的配方对，避免 O(R^2) 两两判定。
-    输出相同的配方对视为良性连带，不记录。
-
-    空催化组（无催化剂、无电路，即编程电路0）是对其它催化组的特殊条件：它自身
-    无任何触发条件，因此本函数额外对它与其他催化组的串配方做**单向全量检查**：
-    只统计「其它催化组配方执行时会连带触发空组配方」（空组配方输入 ⊆ 对方配方
-    输入）的方向，按「空组 × 对方组」汇总对数：日志只列前几条示例（计数为全量）。
-    empty_conflict_console 控制是否同时在终端显示（默认只写日志文件）；
-    empty_conflict_report 传入 dict 时，其中会填入全量报告（见
-    `empty_group_conflict_report`），供调用方单独落盘。
+    Output compatibility:
+    - nodes and adjacency_matrix remain unchanged for graph coloring;
+    - edges and build statistics are added for sparse consumers.
     """
+
     groups = []
     group_indexes = {}
     recipe_group_ids = []
 
     for recipe in recipes:
         current_ids = []
-        for group in recipe.get("catalystGroups", []):
+        effective_groups = recipe.get("catalystGroups") or [
+            {"catalysts": [], "circuit": None}
+        ]
+        for group in effective_groups:
             signature = group_signature(group)
             if signature not in group_indexes:
                 group_indexes[signature] = len(groups)
@@ -462,15 +551,12 @@ def build_conflict_graph(
         recipe_group_ids.append(current_ids)
 
     node_ids = [f"group_{index:04d}" for index in range(len(groups))]
-    self_conflict_count = 0
+    recipe_input_slots = [_recipe_input_slots(recipe) for recipe in recipes]
     recipe_signatures = [recipe_io_signature(recipe) for recipe in recipes]
-    # 配方材料输入（item/fluid）条件集
-    recipe_input_keys = [_recipe_input_keys(recipe) for recipe in recipes]
-    # 配方输出集合，用于「输出相同则豁免」的良性连带过滤
     recipe_outputs = [_recipe_output_keys(recipe) for recipe in recipes]
-    adjacency_matrix = [[0 for _ in groups] for _ in groups]
 
-    # 空催化组（编程电路0）相关的串配方统计：{(空组下标, 对方组下标) -> 记录}
+    adjacency_matrix = [[0 for _ in groups] for _ in groups]
+    edges = set()
     empty_group_indexes = {
         index for index, group in enumerate(groups) if _is_empty_group(group)
     }
@@ -478,16 +564,43 @@ def build_conflict_graph(
         group_index for ids in recipe_group_ids for group_index in ids
     )
     empty_conflicts = {}
+    seen_pairs = set()
+    self_conflict_count = 0
+
+    # Recursive index: active recipes have at least one catalyst group node.
+    active_mask = 0
+    all_supply_masks = {}
+    for recipe_index, slots in enumerate(recipe_input_slots):
+        if not recipe_group_ids[recipe_index]:
+            continue
+        active_mask |= 1 << recipe_index
+        for slot in slots:
+            for key in slot:
+                all_supply_masks[key] = (
+                    all_supply_masks.get(key, 0) | (1 << recipe_index)
+                )
+
+    output_signature_masks = {}
+    io_signature_masks = {}
+    for recipe_index, recipe in enumerate(recipes):
+        if not recipe_group_ids[recipe_index]:
+            continue
+        output_signature = recipe_outputs[recipe_index]
+        output_signature_masks[output_signature] = (
+            output_signature_masks.get(output_signature, 0)
+            | (1 << recipe_index)
+        )
+        io_signature = recipe_signatures[recipe_index]
+        io_signature_masks[io_signature] = (
+            io_signature_masks.get(io_signature, 0)
+            | (1 << recipe_index)
+        )
 
     def record_empty_conflict(empty_recipe, other_recipe, empty_index, other_index):
-        """记录一对「空组配方 ↔ 其它组配方」的串配方（单向：其它组 → 空组）。
-
-        仅当空组配方的材料输入 ⊆ 其它组配方的材料输入（做其它组配方会连带
-        触发空组配方）时才计入；反向不统计。全量配方对写入 `pairs`
-        （日志只列前 _EMPTY_CONFLICT_SAMPLE_LIMIT 条）。
-        """
-        if not _empty_group_triggered_by_other(
-            recipe_input_keys[empty_recipe], recipe_input_keys[other_recipe]
+        """Record other-recipe → empty-group-recipe, using exact slot semantics."""
+        if not _slots_can_match(
+            recipe_input_slots[other_recipe],
+            recipe_input_slots[empty_recipe],
         ):
             return
         record = empty_conflicts.setdefault(
@@ -498,100 +611,139 @@ def build_conflict_graph(
             {"empty_recipe": empty_recipe, "other_recipe": other_recipe}
         )
 
-    # 输入集合 -> 配方下标列表（子集命中索引）
-    input_index = {}
-    for recipe_index, keys in enumerate(recipe_input_keys):
-        input_index.setdefault(keys, []).append(recipe_index)
+    active_recipe_indices = [
+        index for index in range(len(recipes)) if recipe_group_ids[index]
+    ]
+    valid_target_indices = [
+        index
+        for index in active_recipe_indices
+        if not _has_orphan_input(recipes[index])
+    ]
+    orphan_targets_pruned = len(active_recipe_indices) - len(valid_target_indices)
+    candidate_pair_checks = 0
+    exact_conflict_pairs = 0
 
-    seen_pairs = set()
-    for right_index in range(len(recipes)):
-        right_keys = recipe_input_keys[right_index]
-        right_sig = recipe_signatures[right_index]
-        items = list(right_keys)
-        # 枚举 right 输入的全部子集 T：任何输入恰为 T 的配方 left 都满足 left⊆right，
-        # 即二者材料输入互相包含，构成互串配方对（等价于原方向判定为真）。
-        for subset_size in range(len(items) + 1):
-            for combo in combinations(items, subset_size):
-                subset = frozenset(combo)
-                for left_index in input_index.get(subset, ()):
-                    if left_index == right_index:
-                        continue
-                    if recipe_signatures[left_index] == right_sig:
-                        continue
-                    if left_index < right_index:
-                        first, second = left_index, right_index
-                    else:
-                        first, second = right_index, left_index
-                    # 输出完全相同 → 输入上的连带无害，豁免（不记自冲突、不连边）
-                    if recipe_outputs[first] == recipe_outputs[second]:
-                        continue
-                    pair = (first, second)
-                    if pair in seen_pairs:
-                        continue
-                    seen_pairs.add(pair)
-                    first_groups = set(recipe_group_ids[first])
-                    second_groups = set(recipe_group_ids[second])
-                    # 自冲突：公共催化组下两配方互相包含，逐对判定并记录（不跳过）
-                    for group_index in first_groups & second_groups:
-                        self_conflict_count += 1
-                        left_id = recipes[first].get("recipeId", first)
-                        right_id = recipes[second].get("recipeId", second)
-                        directions = []
-                        if recipe_input_keys[second].issubset(
-                            recipe_input_keys[first]
-                        ):
-                            directions.append("left_to_right")
-                        if recipe_input_keys[first].issubset(
-                            recipe_input_keys[second]
-                        ):
-                            directions.append("right_to_left")
-                        logger.warning(
-                            "机器 %s 发现催化组自身冲突: 配方 %s 与 %s，催化组 [%s]，方向=%s",
-                            machine_name, left_id, right_id,
-                            group_label(groups[group_index]), ",".join(directions),
-                        )
-                        logger.info(
-                            "  配方 %s: %s",
-                            left_id,
-                            recipe_io_text(recipes[first]),
-                        )
-                        logger.info(
-                            "  配方 %s: %s",
-                            right_id,
-                            recipe_io_text(recipes[second]),
-                        )
-                    # 空催化组（编程电路0）与其它催化组的串配方：全量记录
-                    if empty_group_indexes:
-                        first_empty = first_groups & empty_group_indexes
-                        second_empty = second_groups & empty_group_indexes
-                        first_other = first_groups - empty_group_indexes
-                        second_other = second_groups - empty_group_indexes
-                        for empty_index in first_empty:
-                            for other_index in second_other:
-                                # 两侧都含该组对时只在后一个循环里记一次，避免重复计数
-                                if (
-                                    empty_index in second_empty
-                                    and other_index in first_other
-                                ):
-                                    continue
-                                record_empty_conflict(
-                                    first, second, empty_index, other_index
-                                )
-                        for empty_index in second_empty:
-                            for other_index in first_other:
-                                record_empty_conflict(
-                                    second, first, empty_index, other_index
-                                )
-                    # 组间边：两配方分属的不同催化组之间均连边
-                    for gi in first_groups:
-                        for gj in second_groups:
-                            if gi == gj:
-                                continue
-                            lo, hi = (gi, gj) if gi < gj else (gj, gi)
-                            adjacency_matrix[hi][lo] = 1
+    for target_index in valid_target_indices:
+        target_slots = recipe_input_slots[target_index]
+        source_mask = active_mask
 
-    for index in range(len(groups)):
-        adjacency_matrix[index][index] = 0
+        # Optimistic recall: each target slot must have at least one source
+        # recipe able to supply one of its alternatives.
+        for target_slot in target_slots:
+            slot_mask = 0
+            for key in target_slot:
+                slot_mask |= all_supply_masks.get(key, 0)
+            source_mask &= slot_mask
+            if not source_mask:
+                break
+        if not source_mask:
+            continue
+
+        source_mask &= ~(1 << target_index)
+        source_mask &= ~output_signature_masks.get(
+            recipe_outputs[target_index], 0
+        )
+        source_mask &= ~io_signature_masks.get(
+            recipe_signatures[target_index], 0
+        )
+
+        while source_mask:
+            lowest = source_mask & -source_mask
+            source_index = lowest.bit_length() - 1
+            source_mask ^= lowest
+            pair = (
+                (source_index, target_index)
+                if source_index < target_index
+                else (target_index, source_index)
+            )
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            candidate_pair_checks += 1
+
+            source_to_target = _slots_can_match(
+                recipe_input_slots[source_index], target_slots
+            )
+            target_to_source = _slots_can_match(
+                target_slots, recipe_input_slots[source_index]
+            )
+            if not source_to_target and not target_to_source:
+                continue
+            exact_conflict_pairs += 1
+
+            first, second = pair
+            if source_index < target_index:
+                left_to_right = source_to_target
+                right_to_left = target_to_source
+            else:
+                left_to_right = target_to_source
+                right_to_left = source_to_target
+
+            first_groups = set(recipe_group_ids[first])
+            second_groups = set(recipe_group_ids[second])
+
+            # Self conflict under a shared catalyst group.
+            for group_index in first_groups & second_groups:
+                self_conflict_count += 1
+                left_id = recipes[first].get("recipeId", first)
+                right_id = recipes[second].get("recipeId", second)
+                directions = []
+                if left_to_right:
+                    directions.append("left_to_right")
+                if right_to_left:
+                    directions.append("right_to_left")
+                logger.warning(
+                    "机器 %s 发现催化组自身冲突: 配方 %s 与 %s，催化组 [%s]，方向=%s",
+                    machine_name, left_id, right_id,
+                    group_label(groups[group_index]), ",".join(directions),
+                )
+                logger.info(
+                    "  配方 %s: %s",
+                    left_id,
+                    recipe_io_text(recipes[first]),
+                )
+                logger.info(
+                    "  配方 %s: %s",
+                    right_id,
+                    recipe_io_text(recipes[second]),
+                )
+
+            # Empty-group one-way report: other recipe → empty recipe.
+            if empty_group_indexes:
+                first_empty = first_groups & empty_group_indexes
+                second_empty = second_groups & empty_group_indexes
+                first_other = first_groups - empty_group_indexes
+                second_other = second_groups - empty_group_indexes
+                for empty_index in first_empty:
+                    for other_index in second_other:
+                        if (
+                            empty_index in second_empty
+                            and other_index in first_other
+                        ):
+                            continue
+                        record_empty_conflict(
+                            first, second, empty_index, other_index
+                        )
+                for empty_index in second_empty:
+                    for other_index in first_other:
+                        record_empty_conflict(
+                            second, first, empty_index, other_index
+                        )
+
+            # Undirected group edge for every cross-group recipe pair.
+            for first_group in first_groups:
+                for second_group in second_groups:
+                    if first_group == second_group:
+                        continue
+                    lo, hi = (
+                        (first_group, second_group)
+                        if first_group < second_group
+                        else (second_group, first_group)
+                    )
+                    edges.add((lo, hi))
+
+    for lo, hi in edges:
+        adjacency_matrix[hi][lo] = 1
 
     _log_empty_group_conflicts(
         machine_name, recipes, groups, empty_group_indexes,
@@ -606,14 +758,31 @@ def build_conflict_graph(
             )
         )
 
-    edge_count = sum(sum(row) for row in adjacency_matrix)
+    edge_count = len(edges)
+    implicit_zero_group = any(
+        not recipe.get("catalystGroups")
+        for recipe in recipes
+    )
     graph = {
         "machine": machine_name,
         "nodes": [
-            {"id": node_ids[index], "group": deepcopy(group)}
+            {
+                "id": node_ids[index],
+                "group": deepcopy(group),
+                "implicit": bool(
+                    implicit_zero_group and _is_empty_group(group)
+                ),
+            }
             for index, group in enumerate(groups)
         ],
         "adjacency_matrix": adjacency_matrix,
+        "edges": [
+            {
+                "source": node_ids[lo],
+                "target": node_ids[hi],
+            }
+            for lo, hi in sorted(edges)
+        ],
         "empty_group_conflict_counts": [
             {
                 "empty_group_index": empty_index,
@@ -622,9 +791,25 @@ def build_conflict_graph(
             }
             for (empty_index, other_index), record in sorted(empty_conflicts.items())
         ],
+        "build_stats": {
+            "active_recipe_count": len(active_recipe_indices),
+            "valid_target_count": len(valid_target_indices),
+            "orphan_targets_pruned": orphan_targets_pruned,
+            "candidate_pair_checks": candidate_pair_checks,
+            "exact_conflict_pairs": exact_conflict_pairs,
+            "edge_count": edge_count,
+            "self_conflict_count": self_conflict_count,
+        },
     }
     logger.debug(
-        "机器 %s 冲突图构建完成: %d 个节点，%d 条边，%d 个自冲突。",
-        machine_name, len(groups), edge_count, self_conflict_count,
+        "机器 %s 冲突图构建完成: %d 个节点，%d 条边，%d 个自冲突；"
+        "orphan 目标剪枝 %d，候选配方对 %d，确认配方对 %d。",
+        machine_name,
+        len(groups),
+        edge_count,
+        self_conflict_count,
+        orphan_targets_pruned,
+        candidate_pair_checks,
+        exact_conflict_pairs,
     )
     return graph

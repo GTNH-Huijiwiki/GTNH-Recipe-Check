@@ -1,26 +1,47 @@
-"""催化组覆盖分析与自动删减。"""
+"""Catalyst relationship partitioning and minimum set cover."""
 
 import logging
 from copy import deepcopy
 
+from Core.catalyst_relations import (
+    RELATION_SCHEMA,
+    classify_relation,
+    pure_containment_chains,
+)
+from Core.grouped_schema import concrete_catalyst_groups, expand_catalyst_choices
 from Core.recipe_checker import group_label, group_signature, item_signature
+from Core.set_cover import minimum_set_cover
 
 logger = logging.getLogger(__name__)
 
 
 def is_empty_group(group):
-    """是否为空催化组（无催化剂、无编程电路），即无条件反应的特殊组。"""
-    return (not group.get("catalysts")) and (not group.get("circuit"))
+    """Whether a group is unconditional (no catalysts, choices or circuit)."""
+
+    return (
+        not group.get("catalysts")
+        and not group.get("catalystChoices")
+        and not group.get("circuit")
+    )
 
 
 def _catalyst_key_set(items):
-    """催化剂的 key 集合（以 key 为身份，不考虑数量）。"""
-    return {item.get("key", "") for item in items}
+    """Catalyst identity set; quantities and display names do not matter."""
+
+    return {item.get("key", "") for item in items if item.get("key")}
 
 
-def group_can_trigger(candidate, required):
-    # 空催化组（无催化剂、无电路）是“无条件反应”的特殊组，只能由它自身触发，
-    # 不应被其它无电路但带催化剂的候选组吸收（否则空组会被摊派/吞并）。
+def _concrete_groups(group):
+    concrete = list(concrete_catalyst_groups(group))
+    if concrete:
+        return concrete
+    # A legacy group without catalystChoices is already concrete.
+    if not group.get("catalystChoices"):
+        return [group]
+    return []
+
+
+def _concrete_group_can_trigger(candidate, required):
     if is_empty_group(required):
         return is_empty_group(candidate)
 
@@ -29,10 +50,24 @@ def group_can_trigger(candidate, required):
     if item_signature(candidate_circuit) != item_signature(required_circuit):
         return False
 
-    # 只按存在性（key）判断，不比较数量
     candidate_catalysts = _catalyst_key_set(candidate.get("catalysts", []))
     required_catalysts = _catalyst_key_set(required.get("catalysts", []))
     return required_catalysts.issubset(candidate_catalysts)
+
+
+def group_can_trigger(candidate, required):
+    """Whether triggering candidate also triggers a required catalyst group.
+
+    A group with several catalysts is treated as one complete trigger set.  A
+    grouped choice is expanded into concrete alternatives first; the candidate
+    only needs to trigger one concrete alternative of the required group.
+    """
+
+    for candidate_variant in _concrete_groups(candidate):
+        for required_variant in _concrete_groups(required):
+            if _concrete_group_can_trigger(candidate_variant, required_variant):
+                return True
+    return False
 
 
 class DisjointSet:
@@ -52,13 +87,48 @@ class DisjointSet:
             self.parents[right_root] = left_root
 
 
+def _empty_metadata(machine_name):
+    return {
+        "machine": machine_name,
+        "components": [],
+        "selected_groups": [],
+        "relationship_component_count": 0,
+        "active_recipe_count": 0,
+        "unique_group_count": 0,
+        "relation_schema": RELATION_SCHEMA,
+        "group_nodes": [],
+        "equivalence_classes": [],
+        "relations": [],
+        "relation_counts": {},
+        "pure_containment_chains": [],
+        "set_cover": {
+            "optimal": True,
+            "candidate_count": 0,
+            "selected_count": 0,
+            "search_nodes": 0,
+        },
+    }
+
+
 def reduce_catalyst_groups(machine_name, recipes):
-    """按配方覆盖集合删减催化组，并返回元数据。"""
+    """Partition catalyst relations, then select a minimum group cover.
+
+    The relation partition is retained intentionally: coverage is split into
+    connected components, equivalent coverage classes become abstract catalyst
+    groups, and groups dominated by a strict superset are discarded.  The
+    remaining top-level candidates are then solved exactly as a minimum
+    cardinality set cover.  A multi-catalyst group is one complete candidate and
+    therefore covers every required catalyst subset as expected.
+    """
+
+    expanded_recipes = [
+        expand_catalyst_choices(recipe) for recipe in recipes
+    ]
     groups = []
     group_indexes = {}
     recipe_groups = []
 
-    for recipe in recipes:
+    for recipe in expanded_recipes:
         current_groups = []
         for group in recipe.get("catalystGroups", []):
             signature = group_signature(group)
@@ -68,9 +138,15 @@ def reduce_catalyst_groups(machine_name, recipes):
             current_groups.append(group_indexes[signature])
         recipe_groups.append(current_groups)
 
+    active_recipe_indexes = {
+        recipe_index
+        for recipe_index, current_groups in enumerate(recipe_groups)
+        if current_groups
+    }
     if not groups:
-        logger.debug("机器 %s 没有可删减的催化组。", machine_name)
-        return recipes, {"machine": machine_name, "components": [], "selected_groups": []}
+        logger.debug("machine %s has no reducible catalyst groups", machine_name)
+        metadata = _empty_metadata(machine_name)
+        return expanded_recipes, metadata
 
     coverage = []
     for candidate in groups:
@@ -95,12 +171,23 @@ def reduce_catalyst_groups(machine_name, recipes):
     for group_index in range(len(groups)):
         components.setdefault(relation.find(group_index), []).append(group_index)
 
-    reduced_recipes = deepcopy(recipes)
-    metadata = {"machine": machine_name, "components": [], "selected_groups": []}
+    reduced_recipes = deepcopy(expanded_recipes)
+    metadata = _empty_metadata(machine_name)
+    metadata["relationship_component_count"] = len(components)
+    metadata["active_recipe_count"] = len(active_recipe_indexes)
+    metadata["unique_group_count"] = len(groups)
+
     selected_groups = []
     abstract_index = 1
+    class_index = 1
+    total_candidates = 0
+    total_search_nodes = 0
 
-    for component_indexes in components.values():
+    component_values = list(components.values())
+    for component_number, component_indexes in enumerate(
+        component_values, start=1
+    ):
+        component_id = f"c{component_number:04d}"
         equivalence_classes = {}
         for group_index in component_indexes:
             equivalence_classes.setdefault(
@@ -132,11 +219,14 @@ def reduce_catalyst_groups(machine_name, recipes):
                     }
                 ]
                 logger.debug(
-                    "机器 %s 等价催化组 %d 个，使用抽象催化剂 %s。",
-                    machine_name, len(class_indexes), abstract_name,
+                    "machine %s equivalent catalyst groups %d -> %s",
+                    machine_name,
+                    len(class_indexes),
+                    abstract_name,
                 )
             class_entries.append(
                 {
+                    "class_id": f"ec{class_index:04d}",
                     "indexes": class_indexes,
                     "coverage": set().union(
                         *(coverage[index] for index in class_indexes)
@@ -145,62 +235,146 @@ def reduce_catalyst_groups(machine_name, recipes):
                     "abstract_replacement": abstract_replacement,
                 }
             )
+            class_index += 1
 
         top_level = [
             entry
             for entry in class_entries
             if not any(entry["coverage"] < other["coverage"] for other in class_entries)
         ]
-        logger.debug(
-            "机器 %s 关系分量候选顶层催化组: %s",
-            machine_name,
-            "; ".join(group_label(entry["group"]) for entry in top_level),
-        )
-
         all_top_level = list(top_level)
-        uncovered = set().union(*(entry["coverage"] for entry in top_level))
-        component_selected = []
-        while uncovered:
-            selected = max(
-                top_level,
-                key=lambda entry: (
-                    len(entry["coverage"] & uncovered),
-                    group_label(entry["group"]),
-                ),
+        component_universe = set().union(
+            *(entry["coverage"] for entry in top_level)
+        )
+        keyed_entries = {
+            index: entry for index, entry in enumerate(top_level)
+        }
+        selected_keys, stats = minimum_set_cover(
+            component_universe,
+            [
+                {"key": index, "coverage": entry["coverage"]}
+                for index, entry in keyed_entries.items()
+            ],
+        )
+        total_candidates += stats["candidate_count"]
+        total_search_nodes += stats["search_nodes"]
+        component_selected = [keyed_entries[index] for index in selected_keys]
+        selected_class_ids = {
+            entry["class_id"] for entry in component_selected
+        }
+        top_level_ids = {entry["class_id"] for entry in top_level}
+
+        for entry in class_entries:
+            for group_index in entry["indexes"]:
+                metadata["group_nodes"].append(
+                    {
+                        "id": f"g{group_index:04d}",
+                        "component": component_id,
+                        "group": deepcopy(groups[group_index]),
+                        "coverage_size": len(coverage[group_index]),
+                        "equivalence_class": entry["class_id"],
+                    }
+                )
+
+        for entry in class_entries:
+            metadata["equivalence_classes"].append(
+                {
+                    "id": entry["class_id"],
+                    "component": component_id,
+                    "member_group_ids": [
+                        f"g{index:04d}" for index in entry["indexes"]
+                    ],
+                    "member_labels": [
+                        group_label(groups[index]) for index in entry["indexes"]
+                    ],
+                    "member_count": len(entry["indexes"]),
+                    "member_relation": (
+                        "equivalent"
+                        if len(entry["indexes"]) > 1
+                        else None
+                    ),
+                    "coverage_size": len(entry["coverage"]),
+                    "coverage": sorted(entry["coverage"]),
+                    "top_level": entry["class_id"] in top_level_ids,
+                    "selected": entry["class_id"] in selected_class_ids,
+                    "abstract_replacement": deepcopy(
+                        entry["abstract_replacement"]
+                    ),
+                }
             )
-            if not selected["coverage"] & uncovered:
-                break
-            component_selected.append(selected)
-            uncovered -= selected["coverage"]
-            top_level.remove(selected)
+
+        for left_index, left in enumerate(class_entries):
+            for right in class_entries[left_index + 1:]:
+                relation_type = classify_relation(
+                    left["coverage"], right["coverage"]
+                )
+                metadata["relations"].append(
+                    {
+                        "left": left["class_id"],
+                        "right": right["class_id"],
+                        "relation": relation_type,
+                        "left_coverage_size": len(left["coverage"]),
+                        "right_coverage_size": len(right["coverage"]),
+                        "intersection_size": len(
+                            left["coverage"] & right["coverage"]
+                        ),
+                    }
+                )
 
         for entry in component_selected:
             selected_groups.append(entry)
             logger.debug(
-                "机器 %s 选择催化组: %s，覆盖 %d 个配方。",
-                machine_name, group_label(entry["group"]), len(entry["coverage"]),
+                "machine %s selected catalyst group %s covering %d recipes",
+                machine_name,
+                group_label(entry["group"]),
+                len(entry["coverage"]),
             )
 
         metadata["components"].append(
             {
+                "id": component_id,
                 "groups": [deepcopy(groups[index]) for index in component_indexes],
-                "top_level_candidates": [deepcopy(entry["group"]) for entry in all_top_level],
+                "equivalence_class_ids": [
+                    entry["class_id"] for entry in class_entries
+                ],
+                "top_level_candidates": [
+                    deepcopy(entry["group"]) for entry in all_top_level
+                ],
                 "equivalent_groups": [
                     {
-                        "members": [deepcopy(groups[index]) for index in entry["indexes"]],
+                        "members": [
+                            deepcopy(groups[index]) for index in entry["indexes"]
+                        ],
                         "replacement": deepcopy(entry["abstract_replacement"]),
                     }
                     for entry in class_entries
                     if len(entry["indexes"]) > 1
                 ],
+                "set_cover": deepcopy(stats),
             }
         )
 
     selected_groups.sort(key=lambda entry: group_label(entry["group"]))
     metadata["selected_groups"] = [
-        {"group": deepcopy(entry["group"]), "coverage": sorted(entry["coverage"])}
+        {
+            "group": deepcopy(entry["group"]),
+            "coverage": sorted(entry["coverage"]),
+            "class_id": entry["class_id"],
+        }
         for entry in selected_groups
     ]
+    relation_counts = {}
+    for relation in metadata["relations"]:
+        relation_type = relation["relation"]
+        relation_counts[relation_type] = relation_counts.get(relation_type, 0) + 1
+    metadata["relation_counts"] = relation_counts
+    metadata["pure_containment_chains"] = pure_containment_chains(metadata)
+    metadata["set_cover"] = {
+        "optimal": True,
+        "candidate_count": total_candidates,
+        "selected_count": len(selected_groups),
+        "search_nodes": total_search_nodes,
+    }
 
     for recipe_index, recipe in enumerate(reduced_recipes):
         recipe["catalystGroups"] = [

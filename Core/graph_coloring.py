@@ -214,7 +214,10 @@ def node_coverages(recipes, graph):
     }
     coverages = [set() for _ in graph["nodes"]]
     for recipe_index, recipe in enumerate(recipes):
-        for group in recipe.get("catalystGroups", []):
+        groups = recipe.get("catalystGroups") or [
+            {"catalysts": [], "circuit": None}
+        ]
+        for group in groups:
             node_index = index_by_signature.get(group_signature(group))
             if node_index is not None:
                 coverages[node_index].add(recipe_index)
@@ -299,7 +302,10 @@ def apply_coloring(recipes, graph, coloring):
     colored_recipes = deepcopy(recipes)
     for recipe in colored_recipes:
         color_ids = []
-        for group in recipe.get("catalystGroups", []):
+        groups = recipe.get("catalystGroups") or [
+            {"catalysts": [], "circuit": None}
+        ]
+        for group in groups:
             node_id = node_by_signature.get(group_signature(group))
             if node_id is None:
                 continue

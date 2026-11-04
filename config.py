@@ -32,7 +32,7 @@ CLEANED_RECIPES_DIR = OUTPUT_ROOT / "cleaned_recipes"
 # 2 过滤产物目录
 FILTERED_RECIPES_DIR = OUTPUT_ROOT / "filtered_recipes"
 
-# 空催化组（编程电路0）单向串配方全量报告（每对配方均列出）
+# 0 组/无条件配方单向串配方全量报告（分析层使用虚拟无条件组）
 EMPTY_CONFLICT_FILE = FILTERED_RECIPES_DIR / "empty_group_conflicts.json"
 
 # 3 着色产物目录
@@ -40,6 +40,25 @@ COLORED_RECIPES_DIR = OUTPUT_ROOT / "colored_recipes"
 
 # 1 阶段等效输入组产物目录（独立于现有冲突检查下游）
 GROUPED_RECIPES_DIR = OUTPUT_ROOT / "grouped_recipes"
+
+# 基于分组配方执行 Rules + 最小催化组覆盖的产物目录
+FILTERED_GROUPED_RECIPES_DIR = OUTPUT_ROOT / "filtered_grouped_recipes"
+
+# 催化组关系报告与纯包含链清单
+CATALYST_RELATION_REPORT = (
+    FILTERED_GROUPED_RECIPES_DIR / "catalyst_relations.json"
+)
+CATALYST_CONTAINMENT_REPORT = (
+    FILTERED_GROUPED_RECIPES_DIR / "catalyst_containments.md"
+)
+GROUPED_CONFLICT_FILE = FILTERED_GROUPED_RECIPES_DIR / "conflict_graph.json"
+GROUPED_EMPTY_CONFLICT_FILE = (
+    FILTERED_GROUPED_RECIPES_DIR / "empty_group_conflicts.json"
+)
+
+# 正式分组链路的最终着色产物
+COLORED_GROUPED_RECIPES_DIR = OUTPUT_ROOT / "colored_grouped_recipes"
+GROUPED_COLORING_FILE = COLORED_GROUPED_RECIPES_DIR / "coloring.json"
 
 # 孤儿标记偏好：contains | only（两种 flag 始终记录，仅用于下游选择）
 GROUP_ORPHAN_MODE = "contains"
@@ -58,6 +77,6 @@ COLOR_CLASS_SIZE_SWEEP = True
 # 逐 1 扫描的最大档位（从 2 起）；None 表示扫到 COLOR_CLASS_MAX_SIZE 或节点数
 COLOR_CLASS_SIZE_SWEEP_MAX = 12
 
-# 空催化组（编程电路0）与其它催化组的串配方检查是否在终端显示；
+# 0 组/无条件配方与其它催化组的串配方检查是否在终端显示；
 # 关闭（默认）时只在 Output/recipe_check.log 中以 DEBUG 级别记录，不刷屏终端。
 LOG_EMPTY_CONFLICT_CONSOLE = False

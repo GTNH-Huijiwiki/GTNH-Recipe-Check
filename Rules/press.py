@@ -15,6 +15,8 @@ originalName（未经翻译），退回按 key 判断（含 `ExtruderShape` / `d
 另：输入物品中存在 originalName **严格等于** `Dough`（面团）的配方也整条删除。
 """
 
+from Core.grouped_schema import remove_matching_input_items
+
 # 输出物品 originalName 前缀
 _EXTRUDER_SHAPE_PREFIX = "Extruder Shape"
 _MOLD_PREFIX = "Mold ("
@@ -76,7 +78,13 @@ def clean(recipes):
     for recipe in recipes:
         if _outputs_all(recipe, _is_extruder_shape) or _outputs_all(recipe, _is_mold):
             continue
-        if _has_input_named(recipe, _REMOVED_INPUT_NAME):
+        # 固定 Dough 输入表示整条配方命中；分组输入只剪掉 Dough 候选。
+        recipe = remove_matching_input_items(
+            recipe,
+            lambda item: isinstance(item, dict)
+            and item.get("originalName") == _REMOVED_INPUT_NAME,
+        )
+        if recipe is None:
             continue
         filtered.append(recipe)
     return filtered

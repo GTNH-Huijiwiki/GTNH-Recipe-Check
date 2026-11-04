@@ -9,6 +9,8 @@
 !Rules/**
 !scripts/
 !scripts/**
+!tests/
+!tests/**
 
 # 白名单目录内仍需排除的构建产物
 __pycache__/

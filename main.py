@@ -10,6 +10,7 @@ from Core.data_loader import (
     load_ore_dictionary,
 )
 from Core.recipe_cleaner import clean_and_merge_recipes
+from Core.recipe_grouper import group_recipes as build_grouped_recipes
 from Core.translator import translate_recipes
 from Core.logger import configure_logging
 from Core.recipe_checker import (
@@ -20,6 +21,10 @@ from Core.recipe_checker import (
     readable_group_label,
 )
 from Core.catalyst_reducer import reduce_catalyst_groups
+from Core.catalyst_relations import (
+    containment_markdown,
+    machine_relation_report,
+)
 from Core.graph_coloring import (
     apply_coloring,
     color_graph,
@@ -514,18 +519,254 @@ def run_color_recipes(filtered_machine_recipes, this_run_keys, abstract_groups):
     logger.info("3.2 步骤完成。")
 
 
+def _find_machine_recipe_file(machine_name):
+    """在 DATA_DIR/Recipes 下查找一台机器的原始配方文件。"""
+    recipes_root = Path(config.DATA_DIR) / "Recipes"
+    matches = sorted(
+        recipes_root.glob(f"*/GTNEIDefaultHandler_{machine_name}.json")
+    )
+    if not matches:
+        return None, None
+    recipe_file = matches[0]
+    return recipe_file, recipe_file.parent.name
+
+
+def run_group_recipes():
+    """1. 将 DATA_DIR 中的机器配方构建为等效输入分组产物。
+
+    正式实现中，本步骤不再由 scripts/ 入口负责。scripts/ 只保留
+    Raw -> Data 的数据预处理职责。
+    """
+    logger.info("========== 1 等效输入分组 ==========")
+    output_dir = config.GROUPED_RECIPES_DIR
+    _ensure_dir(output_dir)
+
+    logger.info("加载物品翻译和矿辞典...")
+    translations = load_item_translations(Path(config.DATA_DIR))
+    ore_dictionary = load_ore_dictionary(Path(config.DATA_DIR))
+    item_keys = set(translations)
+
+    index = []
+    orphan_report = {}
+    for machine_name in sorted(config.INTERESTED_MACHINES):
+        recipe_file, source_name = _find_machine_recipe_file(machine_name)
+        if recipe_file is None:
+            logger.warning("未找到机器配方文件，跳过: %s", machine_name)
+            continue
+
+        data = json.loads(recipe_file.read_text(encoding="utf-8"))
+        raw_recipes = data.get("recipes", [])
+        grouped, report = build_grouped_recipes(
+            raw_recipes,
+            ore_dictionary,
+            translations,
+            item_keys,
+            machine_name=machine_name,
+            orphan_mode=config.GROUP_ORPHAN_MODE,
+        )
+        output_path = output_dir / f"{machine_name}.json"
+        _write_json(output_path, grouped)
+
+        entry = {
+            "machine": machine_name,
+            "name": data.get("name", ""),
+            "source": source_name,
+            "file": output_path.name,
+            **report,
+        }
+        index.append(entry)
+        orphan_report[machine_name] = report
+        logger.info(
+            "分组 %s: %d -> %d -> %d 条；报警 %d；孤儿(has/only)=%d/%d",
+            machine_name,
+            report["inputRecipes"],
+            report["normalizedRecipes"],
+            report["outputRecipes"],
+            sum(report.get("alerts", {}).values()),
+            report["orphanHasInput"],
+            report["orphanOnlyInputs"],
+        )
+
+    _write_json(output_dir / "index.json", index)
+    _write_json(output_dir / "orphan_report.json", orphan_report)
+    logger.info("已生成: %s", output_dir)
+    return len(index)
+
+
+def run_filter_grouped_recipes():
+    """对分组配方执行 Rules、最小催化组覆盖与冲突图构建。
+
+    分组数据已是预处理产物，因此这里不再经过 scripts/split.py 或
+    recipe_cleaner，而是直接读取 Output/grouped_recipes。
+    """
+    logger.info("========== 分组配方：Rules 过滤与最小催化组覆盖 ==========")
+    grouped_dir = config.GROUPED_RECIPES_DIR
+    output_dir = config.FILTERED_GROUPED_RECIPES_DIR
+    _ensure_dir(output_dir)
+
+    source_index = {
+        entry.get("machine", ""): entry
+        for entry in _load_list(grouped_dir / "index.json")
+        if entry.get("machine")
+    }
+    _ensure_dir(config.COLORED_GROUPED_RECIPES_DIR)
+    output_index = []
+    reduction_metadata = []
+    relation_reports = []
+    conflict_graphs = []
+    empty_conflict_reports = []
+    coloring_results = []
+
+    for machine_name in sorted(config.INTERESTED_MACHINES):
+        source_path = grouped_dir / f"{machine_name}.json"
+        if not source_path.exists():
+            logger.warning("缺少分组配方文件，跳过: %s", source_path)
+            continue
+
+        recipes = _load_list(source_path)
+        cleaner = get_cleaner(machine_name)
+        rule_filtered = cleaner(recipes)
+        filtered_recipes, metadata = reduce_catalyst_groups(
+            machine_name, rule_filtered
+        )
+        assign_recipe_ids(machine_name, filtered_recipes)
+
+        output_path = output_dir / source_path.name
+        _write_json(output_path, filtered_recipes)
+
+        empty_report = {}
+        conflict_graph = build_conflict_graph(
+            machine_name,
+            filtered_recipes,
+            abstract_group_map([metadata]),
+            config.LOG_EMPTY_CONFLICT_CONSOLE,
+            empty_conflict_report=empty_report,
+        )
+        conflict_graphs.append(conflict_graph)
+        empty_conflict_reports.append(empty_report)
+
+        abstract_groups = abstract_group_map([metadata])
+        coloring = color_graph(
+            conflict_graph,
+            config.COLORING_ROUNDS,
+            config.COLOR_CLASS_MAX_SIZE,
+            node_coverages(filtered_recipes, conflict_graph),
+            size_sweep=config.COLOR_CLASS_SIZE_SWEEP,
+            sweep_max_size=config.COLOR_CLASS_SIZE_SWEEP_MAX,
+        )
+        colored_recipes, merged_groups = apply_coloring(
+            filtered_recipes, conflict_graph, coloring
+        )
+        fingerprint = graph_fingerprint(conflict_graph)
+        coloring_result = _coloring_summary(
+            machine_name, coloring, merged_groups, fingerprint
+        )
+        coloring_results.append(coloring_result)
+        _write_json(
+            config.COLORED_GROUPED_RECIPES_DIR / source_path.name,
+            colored_recipes,
+        )
+
+        source_entry = source_index.get(machine_name, {})
+        summary = {
+            "machine": machine_name,
+            "name": source_entry.get("name", ""),
+            "source": source_entry.get("source", ""),
+            "file": output_path.name,
+            "recipeCount": len(recipes),
+            "filteredRecipeCount": len(filtered_recipes),
+            "catalystRecipeCount": sum(
+                bool(recipe.get("catalystGroups"))
+                for recipe in filtered_recipes
+            ),
+            "uniqueGroupCount": metadata.get("unique_group_count", 0),
+            "activeGroupCount": len(metadata.get("selected_groups", [])),
+            "selectedGroupCount": len(metadata.get("selected_groups", [])),
+            "componentCount": metadata.get("relationship_component_count", 0),
+            "optimal": bool(metadata.get("set_cover", {}).get("optimal")),
+            "conflictNodeCount": len(conflict_graph.get("nodes", [])),
+            "conflictEdgeCount": len(conflict_graph.get("edges", [])),
+            "orphanTargetsPruned": conflict_graph.get(
+                "build_stats", {}
+            ).get("orphan_targets_pruned", 0),
+            "colorCount": coloring.get("color_count", 0),
+            "largestRecipeClass": coloring.get(
+                "largest_recipe_class", 0
+            ),
+        }
+        relation_report = machine_relation_report(machine_name, metadata)
+        relation_reports.append(relation_report)
+        summary["relationCounts"] = metadata.get("relation_counts", {})
+        summary["containmentChainCount"] = len(
+            metadata.get("pure_containment_chains", [])
+        )
+        output_index.append(summary)
+        _print_coloring(coloring_result, abstract_groups)
+        reduction_metadata.append(metadata)
+        logger.info(
+            "分组配方 %s: %d -> %d 条；唯一组 %d；选中组 %d；最优=%s",
+            machine_name,
+            summary["recipeCount"],
+            summary["filteredRecipeCount"],
+            summary["uniqueGroupCount"],
+            summary["selectedGroupCount"],
+            summary["optimal"],
+        )
+
+    _write_json(output_dir / "index.json", output_index)
+    _write_json(output_dir / "catalyst_reduction.json", reduction_metadata)
+    _write_json(config.CATALYST_RELATION_REPORT, relation_reports)
+    _write_json(config.GROUPED_CONFLICT_FILE, conflict_graphs)
+    _write_json(config.GROUPED_EMPTY_CONFLICT_FILE, empty_conflict_reports)
+    _write_json(config.GROUPED_COLORING_FILE, coloring_results)
+    config.CATALYST_CONTAINMENT_REPORT.write_text(
+        containment_markdown(relation_reports),
+        encoding="utf-8",
+    )
+    logger.info("已生成: %s", output_dir)
+    logger.info("已生成: %s", config.CATALYST_RELATION_REPORT)
+    logger.info("已生成: %s", config.CATALYST_CONTAINMENT_REPORT)
+    logger.info("已生成: %s", config.GROUPED_CONFLICT_FILE)
+    logger.info("已生成: %s", config.GROUPED_EMPTY_CONFLICT_FILE)
+    logger.info("已生成: %s", config.GROUPED_COLORING_FILE)
+    return len(output_index)
+
+
 def main():
+    if "--legacy" not in sys.argv:
+        # 正式分组链路：分组 -> Rules -> 最小覆盖 -> 冲突图。
+        _ensure_dir(config.GROUPED_RECIPES_DIR)
+        grouping_counter = configure_logging(
+            config.GROUPED_RECIPES_DIR / "grouping.log"
+        )
+        grouped_count = run_group_recipes()
+        print(
+            f"分组完成：{grouped_count} 台机器；发现 {grouping_counter.count} 个问题。"
+            f"详细日志: {config.GROUPED_RECIPES_DIR / 'grouping.log'}"
+        )
+
+        _ensure_dir(config.FILTERED_GROUPED_RECIPES_DIR)
+        filter_counter = configure_logging(
+            config.FILTERED_GROUPED_RECIPES_DIR / "filter_grouped.log"
+        )
+        filtered_count = run_filter_grouped_recipes()
+        print(
+            f"分组过滤完成：{filtered_count} 台机器；"
+            f"发现 {filter_counter.count} 个问题。"
+            f"详细日志: "
+            f"{config.FILTERED_GROUPED_RECIPES_DIR / 'filter_grouped.log'}"
+        )
+        return
+
+    # 兼容旧清洗/冲突图/着色链路。
     force = "--rebuild" in sys.argv
     issue_counter = configure_logging(config.LOG_FILE)
     if force:
         logger.info("检测到 --rebuild：强制重新生成 1/2")
-    # 1：清洗（已有产物默认复用；--rebuild 或缺失时才重算）
     cleaned_entries, regenerated_keys = run_clean_recipes(force)
-    # 2：删减（已有过滤产物默认复用）
     filtered_machine_recipes, active_keys, abstract_groups = run_filter_recipes(
         cleaned_entries, regenerated_keys, force
     )
-    # 3：冲突图与着色（每次运行）
     run_color_recipes(filtered_machine_recipes, active_keys, abstract_groups)
     print(f"处理完成，发现 {issue_counter.count} 个问题。详细日志: {config.LOG_FILE}")
 

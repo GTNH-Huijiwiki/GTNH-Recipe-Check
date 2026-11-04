@@ -8,10 +8,16 @@
 注意：原本「带催化剂但无编程电路」的组，置空后将等价于「无条件反应」空组。
 """
 
+from Core.grouped_schema import expand_catalyst_choices
+
 
 def clean(recipes):
     """将每个催化组的 catalysts 置空，仅保留 circuit。"""
+    filtered = []
     for recipe in recipes:
+        recipe = expand_catalyst_choices(recipe)
         for group in recipe.get("catalystGroups", []):
             group["catalysts"] = []
-    return recipes
+            group.pop("catalystChoices", None)
+        filtered.append(recipe)
+    return filtered

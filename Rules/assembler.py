@@ -7,8 +7,9 @@
 
 删除逻辑：
   1. 输入仅为 Volumetric Flask 的配方：整条删除。
-  2. 命中目标催化组的配方（见 _TARGETS 定义，例如战利品 + 编程电路17、
-     远程请求器 + 编程电路18）：
+  2. 命中目标催化组的配方：
+     - 战利品 + 任意编程电路；
+     - 远程请求器 + 编程电路18。
      - 若该配方的全部催化组都命中目标组 → 整条删除
        （此配方仅能靠这些目标组触发）；
      - 若该配方的催化组列表中仅部分命中目标组 → 仅移除命中的组，
@@ -17,18 +18,18 @@
      （originalName 含 Cable）的配方：整条删除。
 """
 
+from Core.grouped_schema import (
+    expand_catalyst_choices,
+    remove_variants_where_all_inputs_match,
+)
 
-# 目标催化组：{催化剂 key 集 : 电路 key 集}
+
+# 战利品采用 originalName 模糊识别。
+_TROPHY_MARKER = "trophy"
+
+# 其余目标催化组：{催化剂 key 集 : 电路 key 集}
 # 命中条件 = 催化剂恰为某指定催化剂 + 电路恰为对应电路。
 _TARGETS = {
-    # 娜迦战利品 / 米诺陶战利品 / 幻影骑士战利品 + 编程电路17
-    frozenset(
-        {
-            "TwilightForest:item.trophy:1",  # Naga Trophy 娜迦战利品
-            "TwilightForest:item.trophy:5",  # Minoshroom Trophy 米诺陶战利品
-            "TwilightForest:item.trophy:6",  # Knight Phantom Trophy 幻影骑士战利品
-        }
-    ): frozenset({"gregtech:gt.integrated_circuit:17"}),
     # 远程请求器 + 编程电路18
     frozenset({"LogisticsPipes:item.remoteOrdererItem:32767"}): frozenset(
         {"gregtech:gt.integrated_circuit:18"}
@@ -36,14 +37,23 @@ _TARGETS = {
 }
 
 
+def _is_trophy_catalyst(catalyst):
+    """按 originalName 模糊识别战利品。"""
+    original_name = str(catalyst.get("originalName", "")).casefold()
+    return _TROPHY_MARKER in original_name
+
+
 def _group_is_target(group):
-    """催化组是否命中任一目标：催化剂恰为某目标催化剂 + 电路恰为对应电路。"""
+    """催化组是否命中目标组合。"""
     catalysts = group.get("catalysts", [])
     circuit = group.get("circuit") or {}
     if len(catalysts) != 1 or not circuit:
         return False
-    catalyst_key = catalysts[0].get("key", "")
+    catalyst = catalysts[0]
+    catalyst_key = catalyst.get("key", "")
     circuit_key = circuit.get("key", "")
+    if _is_trophy_catalyst(catalyst):
+        return True
     for catalyst_keys, circuit_keys in _TARGETS.items():
         if catalyst_key in catalyst_keys and circuit_key in circuit_keys:
             return True
@@ -81,11 +91,14 @@ def clean(recipes):
     """
     filtered = []
     for recipe in recipes:
-        input_items = recipe.get("inputItems", [])
-        input_names = [item.get("originalName", "") for item in input_items]
+        recipe = expand_catalyst_choices(recipe)
 
         # 删除条件：输入仅为容量瓶
-        if set(input_names) == {"Volumetric Flask"}:
+        recipe = remove_variants_where_all_inputs_match(
+            recipe,
+            lambda item: item.get("originalName") == "Volumetric Flask",
+        )
+        if recipe is None:
             continue
 
         # 删除条件：催化组含编程电路24 且输出物品全为线缆(Cable)

@@ -13,6 +13,7 @@ from collections import Counter, defaultdict, deque
 from copy import deepcopy
 from itertools import product
 
+from Core.catalyst_group import normalize_catalyst_groups
 from Core.translator import translate_recipes
 
 logger = logging.getLogger(__name__)
@@ -785,7 +786,7 @@ def _slots_to_fields(recipe):
         ),
         "outputItems": recipe.get("outputItems", []),
         "outputFluids": recipe.get("outputFluids", []),
-        "catalystGroups": output_catalyst_groups,
+        "catalystGroups": normalize_catalyst_groups(output_catalyst_groups),
         "inputGroups": sorted(
             input_groups,
             key=lambda group: (
