@@ -2,11 +2,37 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Union
 
 
 Number = Union[int, float]
+
+UNCONDITIONAL_SET_ID = "catalyst_set:unconditional"
+
+
+def make_unconditional_set():
+    """创建规范化无条件催化集。"""
+    return CatalystSet(
+        set_id=UNCONDITIONAL_SET_ID,
+        catalysts=(),
+        circuit=None,
+        kind="unconditional",
+    )
+
+
+def make_catalyst_set_id(kind, catalysts, circuit):
+    """根据催化集身份生成稳定 set_id。"""
+    identity = {
+        "kind": kind,
+        "catalysts": sorted((item.kind, item.key) for item in catalysts),
+        "circuit": (circuit.kind, circuit.key) if circuit else None,
+    }
+    payload = json.dumps(identity, ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"catalyst_set:{digest[:16]}"
 
 
 @dataclass(frozen=True)

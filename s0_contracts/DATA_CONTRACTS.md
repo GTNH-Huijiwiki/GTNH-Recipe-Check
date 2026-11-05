@@ -1,4 +1,4 @@
-﻿# 数据结构约定
+# 数据结构约定
 
 本文件是 s0-s6 的阶段边界约定。阶段之间通过版本化产物和哈希 manifest 交流，不依赖运行时对象或全局状态。
 
@@ -24,12 +24,11 @@ Output/<version>/
 当前 s2 正式产物：
 
 ~~~text
-Output/<version>/normalized/
+Output/<version>/normalized_recipes/
 ├── manifest.json
 └── machines/
     └── <machine>/
-        ├── recipes.json
-        └── catalyst_sets.json
+        └── recipes.json
 ~~~
 
 ## 2. 基础实体
@@ -165,24 +164,7 @@ catalyst_set_1 OR catalyst_set_2 OR ...
 - 不再生成 `materials.json`；
 - 不再生成 `index.json`。
 
-## 4. CatalystSet 注册表
-
-每台机器输出：
-
-~~~text
-machines/<machine>/catalyst_sets.json
-~~~
-
-~~~json
-{
-  "machine": "assembler",
-  "sets": []
-}
-~~~
-
-注册表保存该机器 recipes 中出现的全部唯一 `CatalystSet`。下游通过 `setId` 引用和验证催化集。
-
-## 5. manifest
+## 4. manifest
 
 `manifest.json` 只保存哈希：
 
@@ -194,8 +176,7 @@ machines/<machine>/catalyst_sets.json
     "recipes": "sha256:..."
   },
   "artifacts": {
-    "machines/assembler/recipes.json": "sha256:...",
-    "machines/assembler/catalyst_sets.json": "sha256:..."
+    "machines/assembler/recipes.json": "sha256:..."
   },
   "outputHash": "sha256:..."
 }
@@ -234,7 +215,7 @@ s1 严格对齐 Wiki Toolchain 数据变换，不负责本项目展示名称清�
 ### s2_normalize
 
 ~~~text
-Data -> Output/<version>/normalized
+Data -> Output/<version>/normalized_recipes
 ~~~
 
 职责：
@@ -246,7 +227,6 @@ Data -> Output/<version>/normalized
 - 建立孤儿标记；
 - 合并等价配方；
 - 分配 recipeId；
-- 生成催化剂集注册表；
 - 生成输入与产物哈希 manifest。
 
 ### s3_rules
@@ -254,29 +234,52 @@ Data -> Output/<version>/normalized
 输入：
 
 ~~~text
-Output/<version>/normalized/
+Output/<version>/normalized_recipes/
+~~~
+
+输出：
+
+~~~text
+Output/<version>/selected_recipes/
+├── manifest.json
+└── machines/
+    └── <machine>/
+        └── recipes.json
 ~~~
 
 职责：
 
 - 在分层 Recipe 上应用机器规则；
-- 删除或裁剪配方；
-- 输出规则过滤后的配方和事件日志。
+- 规则可以保留、修改或删除整条配方；
+- 输出规则处理后的 selected recipes；
+- 详细规则事件只写 recipe_check.log。
 
 ### s4_cover
 
 输入：
 
 ~~~text
-规则过滤后的 Recipe / CatalystSet
+Output/<version>/selected_recipes/
+~~~
+
+输出：
+
+~~~text
+Output/<version>/catalyst_pick/
+├── manifest.json
+└── machines/
+    └── <machine>/
+        └── coverage.json
 ~~~
 
 职责：
 
-- 选取独特 `CatalystSet`；
-- 计算覆盖关系；
+- 从 selected recipes 中提取独特 `CatalystSet`；
 - 实体化无条件催化集；
-- 完成最小催化集覆盖。
+- 计算催化集关系；
+- 记录等价组和最顶层包含统计；
+- 使用精确集合覆盖选择最小覆盖催化集；
+- 不输出或复制 recipes。
 
 覆盖定义：
 
@@ -286,34 +289,79 @@ S.circuit == T.circuit
 T.catalysts ⊆ S.catalysts
 ~~~
 
+`coverage.json` 的核心字段：
+
+- `sets`：该机器的全部独特 `CatalystSet`；
+- `relations.edges`：两两关系；
+- `relations.equivalenceGroups`：包含多个催化集的等价组；
+- `relations.components`：关系连通分量；
+- `relations.containmentChains`：严格包含链；
+- `relations.topLevelContainments`：每个最顶层催化集及其包含的全部下级催化集；
+- `cover.optimal`：最小覆盖是否已证明最优；
+- `cover.selectedSetIds`：最终选取的催化集。
+
 ### s5_conflict
 
 输入：
 
 ~~~text
-已选出的独特 CatalystSet
+Output/<version>/normalized_recipes/
+Output/<version>/selected_recipes/
+Output/<version>/catalyst_pick/
+~~~
+
+输出：
+
+~~~text
+Output/<version>/conflict_graph/
+├── manifest.json
+├── conflicts.md（仅 --conflict-report）
+└── machines/
+    └── <machine>/
+        └── graph.json
 ~~~
 
 职责：
 
-- 构建无向冲突图；
-- 输出稀疏边、上三角矩阵或 dense bitset；
-- 附带冲突 witness；
-- 节点不再使用虚拟催化组。
+- 按发配模式构建无向冲突图；
+- 当前模式为 blocking；
+- 节点为 s4 选中的催化集；
+- 边保存实际冲突配方对；
+- 自冲突保存在 selfConflicts，不生成自环；每个自冲突配方对记一条 `WARNING` 并计入问题数；
+- `CONFLICT_MAX_PAIRS` 可限制每组冲突配方对数，默认 `100`；
+- 仅在 `--conflict-report` 开启时输出完整的人类可读 Markdown 报告；
+- 报告中不截断冲突配方对，并给出机器、节点催化剂条件和完整配方。
 
 ### s6_color
 
 输入：
 
 ~~~text
-ConflictModel + CatalystSet 注册表
+Output/<version>/selected_recipes/
+Output/<version>/catalyst_pick/
+Output/<version>/conflict_graph/
+~~~
+
+输出：
+
+~~~text
+Output/<version>/input_groups/
+├── manifest.json
+└── machines/
+    └── <machine>/
+        └── input_groups.json
 ~~~
 
 职责：
 
-- 对冲突图进行多轮着色；
-- 一个颜色类表示多个 CatalystSet 的 OR；
-- 输出最终 CatalystGroup 和着色方案。
+- 对无向冲突图执行多轮 DSATUR 着色；
+- 同色 CatalystSet 互不冲突；
+- 一个最终输入组表示多个 CatalystSet 的 OR；
+- 将内部颜色编号翻译为输入组1、输入组2……；
+- 等价催化集展开为实际催化剂选项，并以 `or` 连接；
+- 输出每个顶层包含类的内容和直接严格包含关系；
+- 每个输入组统计统合后的独立配方覆盖数；
+- 最终输出不暴露颜色编号。
 
 ## 7. 日志约定
 
@@ -324,6 +372,8 @@ Output/<version>/recipe_check.log
 ~~~
 
 - 终端只显示具体进度摘要和错误摘要；
+- 阶段之间使用 `=` 实线；机器之间使用 `- ` 虚线，机器名只显示一次；
 - DEBUG、WARNING 和完整异常堆栈写入日志；
 - 异常同时输出终端摘要；
+- 问题数按本次运行 `WARNING` 及以上日志记录统计，配方自冲突逐个配方对计数；
 - 不允许业务代码使用 `print`。

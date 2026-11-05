@@ -1,8 +1,11 @@
-﻿"""应用日志配置与问题计数。"""
+"""应用日志配置与问题计数。"""
 
 import logging
 import sys
 from pathlib import Path
+
+
+logger = logging.getLogger("recipe_check")
 
 
 class InfoAndErrorFilter(logging.Filter):
@@ -28,6 +31,20 @@ class IssueCounter(logging.Handler):
 
     def emit(self, record):
         self.count += 1
+
+
+def log_stage(title):
+    """输出阶段分隔线。"""
+    logger.info("=" * 80)
+    logger.info("[阶段] %s", title)
+    logger.info("=" * 80)
+
+
+def log_machine(machine):
+    """输出机器分隔线；机器名只出现一次，后续日志不再重复。"""
+    logger.info("")
+    logger.info("- " * 40)
+    logger.info("%s", machine)
 
 
 def configure_logging(log_path: Path) -> IssueCounter:

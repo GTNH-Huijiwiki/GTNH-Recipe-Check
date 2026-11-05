@@ -17,7 +17,7 @@ INTERESTED_MACHINES = {
     "largechemicalreactor",
     "laserengraver",
     "multimixer",
-    "press",
+    "blastfurnace",
 }
 
 # 输出根目录；每个数据版本单独一个子目录
@@ -29,32 +29,31 @@ VERSIONED_OUTPUT_ROOT = OUTPUT_ROOT / OUTPUT_VERSION
 LOG_FILE = VERSIONED_OUTPUT_ROOT / "recipe_check.log"
 
 # 规范化阶段产物目录
-NORMALIZED_DIR = VERSIONED_OUTPUT_ROOT / "normalized"
+NORMALIZED_RECIPES_DIR = VERSIONED_OUTPUT_ROOT / "normalized_recipes"
 
-# 旧的扁平分组产物目录，仅供尚未迁移的后续阶段临时使用
-GROUPED_RECIPES_DIR = VERSIONED_OUTPUT_ROOT / "grouped_recipes"
+# 机器规则筛选后的配方目录
+SELECTED_RECIPES_DIR = VERSIONED_OUTPUT_ROOT / "selected_recipes"
 
-# 基于分组配方执行 Rules + 最小催化组覆盖的产物目录
-FILTERED_GROUPED_RECIPES_DIR = VERSIONED_OUTPUT_ROOT / "filtered_grouped_recipes"
+# 催化集关系与最小覆盖产物目录
+CATALYST_PICK_DIR = VERSIONED_OUTPUT_ROOT / "catalyst_pick"
 
-# 催化组关系报告与纯包含链清单
-CATALYST_RELATION_REPORT = (
-    FILTERED_GROUPED_RECIPES_DIR / "catalyst_relations.json"
-)
-CATALYST_CONTAINMENT_REPORT = (
-    FILTERED_GROUPED_RECIPES_DIR / "catalyst_containments.md"
-)
-GROUPED_CONFLICT_FILE = FILTERED_GROUPED_RECIPES_DIR / "conflict_graph.json"
-GROUPED_EMPTY_CONFLICT_FILE = (
-    FILTERED_GROUPED_RECIPES_DIR / "empty_group_conflicts.json"
-)
+# 无向冲突图产物目录
+CONFLICT_GRAPH_DIR = VERSIONED_OUTPUT_ROOT / "conflict_graph"
 
-# 正式分组链路的最终着色产物
-COLORED_GROUPED_RECIPES_DIR = VERSIONED_OUTPUT_ROOT / "colored_grouped_recipes"
-GROUPED_COLORING_FILE = COLORED_GROUPED_RECIPES_DIR / "coloring.json"
+# 最终输入组方案目录
+INPUT_GROUPS_DIR = VERSIONED_OUTPUT_ROOT / "input_groups"
+
+# 冲突图构建模式
+CONFLICT_MODE = "blocking"
+
+# 每个催化集对最多保留的冲突配方对数
+CONFLICT_MAX_PAIRS = 100
 
 # 孤儿标记偏好：contains | only（两种 flag 始终记录，仅用于下游选择）
 GROUP_ORPHAN_MODE = "contains"
+
+# 图着色策略
+COLORING_STRATEGY = "dsatur_multistart"
 
 # 冲突图着色探索轮数（每个「单色类最大节点数」档位各跑这么多轮）
 COLORING_ROUNDS = 128
@@ -69,7 +68,3 @@ COLOR_CLASS_SIZE_SWEEP = True
 
 # 逐 1 扫描的最大档位（从 2 起）；None 表示扫到 COLOR_CLASS_MAX_SIZE 或节点数
 COLOR_CLASS_SIZE_SWEEP_MAX = 12
-
-# 0 组/无条件配方与其它催化组的串配方检查是否在终端显示；
-# 关闭（默认）时只在 Output/<version>/recipe_check.log 中以 DEBUG 级别记录，不刷屏终端。
-LOG_EMPTY_CONFLICT_CONSOLE = False

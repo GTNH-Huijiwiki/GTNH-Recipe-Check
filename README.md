@@ -49,9 +49,9 @@ GTNH-Recipe-Check/
 | `s1_preprocess` | 1 | Dumper 原始数据整理为 Data；变换严格同步 Wiki Toolchain |
 | `s2_normalize` | 2 | InputSlot/InputGroup、CatalystSet/CatalystGroup 规范化 |
 | `s3_rules` | 3 | 按机器执行 Rules |
-| `s4_cover` | 3 | 关系划分与最小催化集覆盖 |
+| `s4_cover` | 4 | 关系划分与最小催化集覆盖 |
 | `s5_conflict` | 4 | 无向冲突矩阵构建 |
-| `s6_color` | 5 | 图染色搜索 |
+| `s6_color` | 6 | 图着色与最终输入组翻译 |
 | `s9_validation` | 验证 | 测试、实验和历史复核工具 |
 
 ---
@@ -90,11 +90,14 @@ python main.py --stage all              # 从 Raw 开始完整执行
 ```bash
 python main.py --stage preprocess   # 第一步：Raw -> Data
 python main.py --stage normalize    # s2：规范化输入/催化组合
-python main.py --stage cover        # s3：Rules + 最小催化集覆盖
-python main.py --stage conflict     # s4：冲突矩阵
-python main.py --stage color        # s5：图染色
-python main.py --stage all          # 从 Raw 开始完整执行
-python main.py                      # 默认从 normalize 执行到 color
+python main.py --stage rules        # s3：应用机器规则，生成 selected_recipes
+python main.py --stage cover        # s4：催化集关系与最小覆盖，生成 catalyst_pick
+python main.py --stage conflict     # s5：构建无向冲突图，生成 conflict_graph
+python main.py --stage conflict --conflict-report  # 额外生成完整人类可读冲突报告
+python main.py --no-rules          # 跳过 s3 规则，输出到 Output/<版本>-no-rules
+python main.py --stage color        # s6：图着色并翻译为最终输入组
+python main.py --stage all          # 依次执行 preprocess -> normalize -> rules -> cover -> conflict -> color
+python main.py                      # 默认执行 normalize -> rules
 ```
 
 若 `Data/` 已存在，通常只运行：
@@ -165,9 +168,11 @@ python -m unittest discover -s s9_validation -v
 
 | 参数 | 说明 |
 |---|---|
-| `--stage <name>` | 单独执行 `preprocess` / `normalize` / `cover` / `conflict` / `color` / `all`。 |
+| `--stage <name>` | 单独执行 `preprocess` / `normalize` / `rules` / `cover` / `conflict` / `color` / `all`。 |
+| `--conflict-report` | 生成完整人类可读冲突报告 `conflict_graph/conflicts.md`；默认关闭。 |
+| `--no-rules` | s3 不应用任何机器规则，原样复制 normalized recipes；全部产物写入 `Output/<版本>-no-rules/`，不影响正式输出。 |
 
-不传 `--stage` 时执行 `normalize → cover → conflict → color`；`--stage all` 额外从 Raw 开始执行预处理。
+不传 `--stage` 时执行 `normalize → rules → cover → conflict → color`；`--stage all` 额外从 Raw 开始执行预处理。
 
 ---
 
@@ -182,14 +187,14 @@ python -m unittest discover -s s9_validation -v
 | `OUTPUT_ROOT` | 输出总目录 | `Output` |
 | `OUTPUT_VERSION` | 输出版本名，默认取 `DATA_SPLIT_DIR.name` | `2.9.0` |
 | `VERSIONED_OUTPUT_ROOT` | 按版本隔离的阶段产物根目录 | `Output/<version>` |
-| `NORMALIZED_DIR` | 规范化阶段产物目录 | `Output/<version>/normalized` |
-| `FILTERED_GROUPED_RECIPES_DIR` | 分组配方规则过滤 + 最小催化组覆盖产物目录 | `Output/<version>/filtered_grouped_recipes` |
-| `CATALYST_RELATION_REPORT` | 催化组关系规范 JSON | `Output/<version>/filtered_grouped_recipes/catalyst_relations.json` |
-| `CATALYST_CONTAINMENT_REPORT` | 纯包含链 Markdown 报告 | `Output/<version>/filtered_grouped_recipes/catalyst_containments.md` |
-| `GROUPED_CONFLICT_FILE` | 分组链路冲突图 | `Output/<version>/filtered_grouped_recipes/conflict_graph.json` |
-| `GROUPED_EMPTY_CONFLICT_FILE` | 分组链路空组冲突全量报告 | `Output/<version>/filtered_grouped_recipes/empty_group_conflicts.json` |
-| `COLORED_GROUPED_RECIPES_DIR` | 正式链路最终着色目录 | `Output/<version>/colored_grouped_recipes` |
-| `GROUPED_COLORING_FILE` | 正式链路着色汇总 | `Output/<version>/colored_grouped_recipes/coloring.json` |
+| `NORMALIZED_RECIPES_DIR` | 规范化阶段产物目录 | `Output/<version>/normalized_recipes` |
+| `SELECTED_RECIPES_DIR` | 机器规则处理后的配方目录 | `Output/<version>/selected_recipes` |
+| `CATALYST_PICK_DIR` | 催化集关系与最小覆盖产物目录 | `Output/<version>/catalyst_pick` |
+| `CONFLICT_GRAPH_DIR` | 无向冲突图产物目录 | `Output/<version>/conflict_graph` |
+| `CONFLICT_MODE` | 冲突检查发配模式 | `blocking` |
+| `CONFLICT_MAX_PAIRS` | 每个催化集对和每个自冲突组最多保留的冲突配方对数 | `100` |
+| `INPUT_GROUPS_DIR` | 最终输入组方案目录 | `Output/<version>/input_groups` |
+| `COLORING_STRATEGY` | 图着色策略 | `dsatur_multistart` |
 | `GROUP_ORPHAN_MODE` | 孤儿标记偏好：`contains` / `only`（两种 flag 始终记录，不删除配方） | `contains` |
 | `COLORING_ROUNDS` | 冲突图着色每个「单色类最大节点数」档位的随机探索轮数，越大越可能找到更优解 | `128` |
 | `COLOR_CLASS_MAX_SIZE` | 单个颜色类允许的最大节点数；`None` 表示不限制 | `None` |
@@ -208,10 +213,11 @@ python -m unittest discover -s s9_validation -v
 ```mermaid
 flowchart LR
     A["Dumper 导出<br/>(DUMPER_DIR)"] -->|PreprocessHandler| B["Data/&lt;版本&gt;<br/>Items / OreDictionary / Recipes"]
-    B -->|main.py 1| H["normalized<br/>规范化配方"]
-    H -->|main.py 2<br/>Rules + 最小覆盖| I["filtered_grouped_recipes"]
-    I -->|main.py 3<br/>orphan + bitset + slot match| J["conflict_graph.json"]
-    J -->|color_graph + apply_coloring| K["colored_grouped_recipes"]
+    B -->|main.py 1| H["normalized_recipes<br/>规范化配方"]
+    H -->|main.py 2<br/>Rules| I["selected_recipes"]
+    I -->|main.py 3<br/>关系 + 最小覆盖| C["catalyst_pick"]
+    I -->|main.py 4<br/>冲突分析| J["conflict_graph.json"]
+    J -->|图着色 + 输入组翻译| K["input_groups"]
 ```
 
 ---
@@ -221,30 +227,54 @@ flowchart LR
 | 路径 | 内容 |
 |---|---|
 | `Output/<version>/recipe_check.log` | 统一运行日志：记录详细进度、警告、错误和异常堆栈 |
-| `Output/<version>/normalized/manifest.json` | s2 上游输入、产物文件和聚合输出哈希 |
-| `Output/<version>/normalized/machines/<machine>/recipes.json` | 规范化 Recipe 列表 |
-| `Output/<version>/normalized/machines/<machine>/catalyst_sets.json` | 该机器使用的唯一 CatalystSet 注册表 |
-| `Output/<version>/filtered_grouped_recipes/{machine}.json` | 分组配方经 Rules 过滤、催化组最小覆盖后的配方（保留 `inputGroups` 和规范 `catalystGroups`） |
-| `Output/<version>/filtered_grouped_recipes/catalyst_reduction.json` | 分组链路的关系分量、等价组、顶层候选、精确集合覆盖统计与最优性标记 |
-| `Output/<version>/filtered_grouped_recipes/catalyst_relations.json` | 催化组覆盖关系规范：原始组、等价类、五类关系与覆盖规模 |
-| `Output/<version>/filtered_grouped_recipes/catalyst_containments.md` | 最底层等价类到最顶层根组的纯包含链清单 |
-| `Output/<version>/filtered_grouped_recipes/conflict_graph.json` | 分组输入感知的冲突图；含稀疏边、邻接矩阵与 `build_stats` |
-| `Output/<version>/filtered_grouped_recipes/empty_group_conflicts.json` | 空催化组单向冲突全量报告 |
+| `Output/<version>/normalized_recipes/manifest.json` | s2 上游输入、产物文件和聚合输出哈希 |
+| `Output/<version>/normalized_recipes/machines/<machine>/recipes.json` | 规范化 Recipe 列表 |
+| `Output/<version>/selected_recipes/machines/<machine>/recipes.json` | 规则处理后的 Recipe 列表 |
+| `Output/<version>/catalyst_pick/manifest.json` | s4 上游与 coverage 产物哈希 |
+| `Output/<version>/catalyst_pick/machines/<machine>/coverage.json` | 独特催化集、关系边、等价组、顶层包含统计和最小覆盖结果 |
+| `Output/<version>/conflict_graph/manifest.json` | s5 上下游哈希 |
+| `Output/<version>/conflict_graph/machines/<machine>/graph.json` | 无向冲突图、冲突配方对和自冲突 |
+| `Output/<version>/conflict_graph/conflicts.md` | 可选的人类可读冲突报告：仅使用 `--conflict-report` 时生成，包含节点催化剂、全部包含方向和完整配方对、节点内自冲突 |
+| `Output/<version>/input_groups/manifest.json` | s6 上下游哈希 |
+| `Output/<version>/input_groups/machines/<machine>/input_groups.json` | 最终输入组、等价催化选项（`or`）、顶层包含关系、展示标签和配方覆盖数 |
 
 ---
 
 ## 机器专属规则（s3_rules/）
 
-`s3_rules/*.py` 提供 `clean(recipes) -> recipes`，在 2 阶段、**催化组删减之前**执行，因此看到的是「等效合并后、尚未做子集拆分/抽象替换」的原始催化组列表。
+`s3_rules/*.py` 提供 `apply(recipe) -> Recipe | None`：
+
+- 返回 Recipe：保留或修改配方；
+- 返回 None：删除整条配方。
+
+输入来自：
+
+```text
+Output/<version>/normalized_recipes/
+```
+
+输出到：
+
+```text
+Output/<version>/selected_recipes/
+├── manifest.json
+└── machines/
+    └── <machine>/
+        └── recipes.json
+```
 
 已注册规则：
 
-- `assembler.py`（组装机）：删除输入仅为 `Volumetric Flask` 的配方；按 `originalName` 模糊识别并移除“战利品 + 任意编程电路”的催化组；移除“远程请求器 + 编程电路18”的催化组；删除「催化组含编程电路 24 且输出物品全为 Cable」的配方。
-- `fluidchemicaleactor.py`（化工厂）：把每个催化组的催化剂部分置空，只保留编程电路。
-- `laserengraver.py`（激光蚀刻机）：删除若干特定输入/输出形状的配方。
-- `press.py`（冲压机床）：删除输出物品全部为 `Extruder Shape`（模头）或全部为 `Mold`（模具）的复制型配方；删除普通输入中含 `originalName` 严格为 `Dough`（面团）的配方。
+- `alloyblastsmelter.py`（合金高炉）：删除使用编程电路 11 的配方。
+- `assembler.py`（组装机）：删除输入仅为 `Volumetric Flask` 的配方；存在“战利品 + 任意编程电路”催化集时删除整条配方；删除「催化组含编程电路 24 且输出物品全为 Cable」的配方；删除任意输出为 `2x/4x/8x/12x/16x Superconductor ... Wire` 的多重超导导线配方。不再包含“远程请求器 + 编程电路18”规则。
+- `blastfurnace.py`（工业高炉）：删除普通输入仅由 `Hafnium Iodide Dust`（按 `originalName` 匹配）构成的配方。
+- `fluidchemicaleactor.py`（化工厂）：清空每个催化集的催化剂；有电路时保留电路，无电路时转为显式无条件催化集。
+- `laserengraver.py`（激光蚀刻机）：按输入、输出和催化集条件修改或删除配方。
+- `press.py`（冲压机床）：删除模头/模具复制型配方，并删除包含 `Dough` 的输入条件。
 
-新增机器规则：在 `s3_rules/` 下新建 `<机器>.py` 实现 `clean`，并在 `s3_rules/registry.py` 的 `_MACHINE_CLEANERS` 中注册。未注册的机器使用默认 cleaner（原样返回）。
+新增机器规则：在 `s3_rules/` 下新建 `<机器>.py` 实现 `apply`，并在 `s3_rules/registry.py` 中注册。未注册机器原样保留配方。
+
+需要完全跳过规则进行对照时，使用 `--no-rules`；该模式仍执行 s3 阶段以生成 `selected_recipes`，但每条配方原样复制。
 
 ---
 
@@ -329,7 +359,7 @@ $$ Recipes(G) = \bigcup_{\emptyset \neq S \subseteq G} Recipes(S) $$
    - **orphan 目标剪枝**：目标配方任一输入槽全部为 orphan 输入时，其它配方不可能提供该槽，直接跳过该目标。
    - **bitset 候选召回**：按输入 key 预计算可提供该 key 的配方 bitset，对目标槽求交得到候选源，最后再做精确槽位匹配。
    - **输出相等豁免**：若两配方输出（物品+流体，忽略数量）**完全相同**，则即使输入构成包含也视为良性连带，不判为串配方（不记自冲突、不连边）。
-   - **自冲突**：落在同一催化组内、且构成串配方的非等效配方对，记入日志（无法靠分组解决）。
+   - **自冲突**：落在同一催化组内、且构成串配方的非等效配方对，记入日志（无法靠分组解决）；每个自冲突配方对记一条 `WARNING`，并计入最终问题数。
    - **0 组/无条件配方单向全量检查**：分析层只统计「其它组配方 → 无条件配方」方向；orphan 无条件配方不会成为被触发目标。全量报告写入 `Output/<version>/filtered_grouped_recipes/empty_group_conflicts.json`，`conflict_graph.json` 的 `empty_group_conflict_counts` 只保留计数。
 2. **着色**（`color_graph` + `apply_coloring`）：
    - 相邻节点必须不同色（即冲突的催化组不能共处同一缓存）；
@@ -349,4 +379,5 @@ $$ Recipes(G) = \bigcup_{\emptyset \neq S \subseteq G} Recipes(S) $$
 - **改了 `s3_rules/` 但结果没变**：正式链路会重新计算。
 - **只想更新部分机器**：把目标机器放入白名单即可，未列入的机器旧产物不受影响。
 - **想新增某台机器的删减规则**：在 `s3_rules/<机器>.py` 实现 `clean` 并到 `s3_rules/registry.py` 注册。
+- **问题数如何统计**：统计本次运行产生的全部 `WARNING` 及以上日志记录；配方自冲突按配方对逐条计入。
 - **展示/日志乱码（Windows）**：控制台重定向可能因 GBK 无法输出中文与特殊符号，可改用 `python -X utf8 ...` 或先执行 `chcp 65001`。

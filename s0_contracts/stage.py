@@ -1,4 +1,4 @@
-﻿"""流水线阶段公共契约。"""
+"""流水线阶段公共契约。"""
 
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ class RunContext:
     raw_dir: Path
     data_dir: Path
     output_dir: Path
+    generate_conflict_report: bool = False
+    no_rules: bool = False
 
 
 @dataclass(frozen=True)

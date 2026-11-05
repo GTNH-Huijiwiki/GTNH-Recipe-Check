@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from s0_contracts.logger import log_stage
 from s0_contracts.stage import RunContext, StageResult
 from s1_preprocess.split import run_items, run_oredictionary, run_recipes
 
@@ -14,7 +15,7 @@ class PreprocessHandler:
     name = "preprocess"
 
     def run(self, context: RunContext) -> StageResult:
-        logger.info("开始预处理：Raw -> Data")
+        log_stage("预处理：Raw -> Data")
 
         logger.info("处理物品与流体")
         items = run_items(context.raw_dir, context.data_dir)

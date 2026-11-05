@@ -1,126 +1,85 @@
-"""组装机专属删减规则。
+﻿"""组装机专属规则。"""
 
-本规则运行在 2「删减配方」阶段：此时配方已完成清洗与等效合并
-（催化组列表可能含多个），但尚未进入 2 的「删减催化剂」
-（reduce_catalyst_groups），因此催化组尚未做子集拆分/抽象替换——
-即这里的催化组列表即“原始配方”声明的触发条件。
+import logging
 
-删除逻辑：
-  1. 输入仅为 Volumetric Flask 的配方：整条删除。
-  2. 命中目标催化组的配方：
-     - 战利品 + 任意编程电路；
-     - 远程请求器 + 编程电路18。
-     - 若该配方的全部催化组都命中目标组 → 整条删除
-       （此配方仅能靠这些目标组触发）；
-     - 若该配方的催化组列表中仅部分命中目标组 → 仅移除命中的组，
-       保留其余组与配方（配方在其它催化组条件下仍可触发）。
-  3. 催化组含编程电路 24（按 key 匹配）且输出物品全部为线缆
-     （originalName 含 Cable）的配方：整条删除。
-"""
+from s0_contracts.schema import Recipe
+from s3_rules.helpers import outputs_all, remove_variants_where_all_inputs_match
 
-from s2_normalize.grouped_schema import (
-    expand_catalyst_choices,
-    remove_variants_where_all_inputs_match,
+logger = logging.getLogger(__name__)
+
+_TROPHY_MARKER = "trophy"
+_CIRCUIT_24_KEY = "gregtech:gt.integrated_circuit:24"
+_MULTI_SUPERCONDUCTOR_PREFIXES = (
+    "2x Superconductor ",
+    "4x Superconductor ",
+    "8x Superconductor ",
+    "12x Superconductor ",
+    "16x Superconductor ",
 )
 
 
-# 战利品采用 originalName 模糊识别。
-_TROPHY_MARKER = "trophy"
-
-# 其余目标催化组：{催化剂 key 集 : 电路 key 集}
-# 命中条件 = 催化剂恰为某指定催化剂 + 电路恰为对应电路。
-_TARGETS = {
-    # 远程请求器 + 编程电路18
-    frozenset({"LogisticsPipes:item.remoteOrdererItem:32767"}): frozenset(
-        {"gregtech:gt.integrated_circuit:18"}
-    ),
-}
+def _is_trophy_catalyst(item):
+    return _TROPHY_MARKER in item.original_name.casefold()
 
 
-def _is_trophy_catalyst(catalyst):
-    """按 originalName 模糊识别战利品。"""
-    original_name = str(catalyst.get("originalName", "")).casefold()
-    return _TROPHY_MARKER in original_name
-
-
-def _group_is_target(group):
-    """催化组是否命中目标组合。"""
-    catalysts = group.get("catalysts", [])
-    circuit = group.get("circuit") or {}
-    if len(catalysts) != 1 or not circuit:
-        return False
-    catalyst = catalysts[0]
-    catalyst_key = catalyst.get("key", "")
-    circuit_key = circuit.get("key", "")
-    if _is_trophy_catalyst(catalyst):
-        return True
-    for catalyst_keys, circuit_keys in _TARGETS.items():
-        if catalyst_key in catalyst_keys and circuit_key in circuit_keys:
-            return True
-    return False
-
-
-# 编程电路 24（按 key 匹配）
-_CIRCUIT_24_KEY = "gregtech:gt.integrated_circuit:24"
-
-
-def _group_uses_circuit_24(group):
-    """催化组是否含编程电路 24（匹配 circuit 字段或催化剂列表中的 key）。"""
-    circuit = group.get("circuit") or {}
-    if circuit.get("key") == _CIRCUIT_24_KEY:
-        return True
-    return any(
-        catalyst.get("key") == _CIRCUIT_24_KEY
-        for catalyst in group.get("catalysts", [])
+def _is_trophy_circuit_set(catalyst_set):
+    return (
+        len(catalyst_set.catalysts) == 1
+        and catalyst_set.circuit is not None
+        and _is_trophy_catalyst(catalyst_set.catalysts[0])
     )
 
 
-def _outputs_are_cables(recipe):
-    """输出物品非空且全部为线缆（originalName 含 Cable）。"""
-    output_items = recipe.get("outputItems", [])
-    if not output_items:
-        return False
-    return all("Cable" in item.get("originalName", "") for item in output_items)
+def _uses_circuit_24(catalyst_set):
+    if catalyst_set.circuit and catalyst_set.circuit.key == _CIRCUIT_24_KEY:
+        return True
+    return any(item.key == _CIRCUIT_24_KEY for item in catalyst_set.catalysts)
 
 
-def clean(recipes):
-    """
-    组装机配方删减规则。
-    输入：清洗并合并后、尚未做催化组子集替换的配方列表。
-    输出：删减后的配方列表。
-    """
-    filtered = []
-    for recipe in recipes:
-        recipe = expand_catalyst_choices(recipe)
+def _is_cable(item):
+    return "Cable" in item.original_name
 
-        # 删除条件：输入仅为容量瓶
-        recipe = remove_variants_where_all_inputs_match(
-            recipe,
-            lambda item: item.get("originalName") == "Volumetric Flask",
+
+def _is_multi_superconductor_wire(item):
+    return item.original_name.startswith(
+        _MULTI_SUPERCONDUCTOR_PREFIXES
+    ) and item.original_name.endswith(" Wire")
+
+
+def apply(recipe: Recipe):
+    """应用组装机规则，返回保留后的配方或 None。"""
+    recipe_id = recipe.recipe_id
+    if any(_is_multi_superconductor_wire(item) for item in recipe.output_group.items):
+        logger.debug(
+            "组装机规则删除配方 %s：输出包含多重超导导线",
+            recipe_id,
         )
-        if recipe is None:
-            continue
+        return None
 
-        # 删除条件：催化组含编程电路24 且输出物品全为线缆(Cable)
-        if _outputs_are_cables(recipe) and any(
-            _group_uses_circuit_24(group)
-            for group in recipe.get("catalystGroups", [])
-        ):
-            continue
+    if any(_is_trophy_circuit_set(item) for item in recipe.catalyst_group.sets):
+        logger.debug(
+            "组装机规则删除配方 %s：存在战利品与编程电路组合",
+            recipe.recipe_id,
+        )
+        return None
 
-        catalyst_groups = recipe.get("catalystGroups", [])
-        if catalyst_groups:
-            hit_flags = [_group_is_target(group) for group in catalyst_groups]
-            if all(hit_flags):
-                # 该配方只能靠目标催化组触发：整条删除
-                continue
-            if any(hit_flags):
-                # 部分命中：仅移除命中的目标组，保留其余组与配方
-                recipe["catalystGroups"] = [
-                    group
-                    for group, hit in zip(catalyst_groups, hit_flags)
-                    if not hit
-                ]
+    recipe = remove_variants_where_all_inputs_match(
+        recipe,
+        lambda item: item.original_name == "Volumetric Flask",
+    )
+    if recipe is None:
+        logger.debug(
+            "组装机规则删除配方 %s：输入仅为容量瓶",
+            recipe_id,
+        )
+        return None
 
-        filtered.append(recipe)
-    return filtered
+    if outputs_all(recipe, _is_cable) and any(
+        _uses_circuit_24(item) for item in recipe.catalyst_group.sets
+    ):
+        logger.debug(
+            "组装机规则删除配方 %s：编程电路24且输出全部为线缆",
+            recipe.recipe_id,
+        )
+        return None
+    return recipe

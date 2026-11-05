@@ -1,4 +1,4 @@
-﻿"""s2 规范化阶段处理器。"""
+"""s2 规范化阶段处理器。"""
 
 from __future__ import annotations
 
@@ -19,7 +19,9 @@ from s0_contracts.schema import (
     OutputGroup,
     Recipe,
     RecipeProvenance,
+    make_catalyst_set_id,
 )
+from s0_contracts.logger import log_machine, log_stage
 from s0_contracts.stage import RunContext, StageResult
 from s2_normalize.data_loader import load_item_translations, load_ore_dictionary
 from s2_normalize.recipe_grouper import group_recipes
@@ -65,17 +67,6 @@ def _material(value, kind):
     )
 
 
-def _catalyst_set_id(kind, catalysts, circuit):
-    identity = {
-        "kind": kind,
-        "catalysts": sorted(
-            (item.kind, item.key) for item in catalysts
-        ),
-        "circuit": (circuit.kind, circuit.key) if circuit else None,
-    }
-    payload = json.dumps(identity, ensure_ascii=False, separators=(",", ":"))
-    return "catalyst_set:" + _sha256_bytes(payload.encode("utf-8"))[:16]
-
 
 def _build_catalyst_set(value):
     catalysts = tuple(_material(item, "item") for item in value.get("catalysts", []))
@@ -83,7 +74,7 @@ def _build_catalyst_set(value):
     circuit = _material(circuit_value, "item") if circuit_value else None
     kind = value.get("kind", "normal")
     return CatalystSet(
-        set_id=_catalyst_set_id(kind, catalysts, circuit),
+        set_id=make_catalyst_set_id(kind, catalysts, circuit),
         catalysts=catalysts,
         circuit=circuit,
         kind=kind,
@@ -166,7 +157,7 @@ class NormalizeHandler:
     name = "normalize"
 
     def run(self, context: RunContext) -> StageResult:
-        logger.info("开始规范化配方")
+        log_stage("规范化：Data -> normalized_recipes")
         logger.info("加载物品与矿辞")
         translations = load_item_translations(context.data_dir)
         ore_dictionary = load_ore_dictionary(context.data_dir)
@@ -177,15 +168,15 @@ class NormalizeHandler:
             len(ore_dictionary),
         )
 
-        output_dir = context.output_dir / "normalized"
+        output_dir = context.output_dir / "normalized_recipes"
         if output_dir.exists():
             shutil.rmtree(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         recipe_files = []
         total_recipes = 0
-        total_sets = 0
         for machine in sorted(config.INTERESTED_MACHINES):
+            log_machine(machine)
             source_path = _find_recipe_file(context.data_dir, machine)
             if source_path is None:
                 raise FileNotFoundError(
@@ -213,12 +204,6 @@ class NormalizeHandler:
                 for index, value in enumerate(grouped)
             ]
 
-            unique_sets = {}
-            for recipe in recipes:
-                for catalyst_set in recipe.catalyst_group.sets:
-                    unique_sets.setdefault(catalyst_set.set_id, catalyst_set)
-            catalyst_sets = [unique_sets[key] for key in sorted(unique_sets)]
-
             machine_dir = output_dir / "machines" / machine
             _write_json(
                 machine_dir / "recipes.json",
@@ -227,21 +212,11 @@ class NormalizeHandler:
                     "recipes": [recipe.to_dict() for recipe in recipes],
                 },
             )
-            _write_json(
-                machine_dir / "catalyst_sets.json",
-                {
-                    "machine": machine,
-                    "sets": [item.to_dict() for item in catalyst_sets],
-                },
-            )
             total_recipes += len(recipes)
-            total_sets += len(catalyst_sets)
             logger.info(
-                "规范化 %s：%d → %d 条配方，%d 个催化集",
-                machine,
+                "规范化：%d → %d 条配方",
                 report["inputRecipes"],
                 report["outputRecipes"],
-                len(catalyst_sets),
             )
 
         upstream = {
@@ -254,10 +229,9 @@ class NormalizeHandler:
         manifest = _manifest(upstream, output_dir)
         _write_json(output_dir / "manifest.json", manifest)
         logger.info(
-            "配方规范化完成：%d 台机器，%d 条配方，%d 个催化集",
+            "配方规范化完成：%d 台机器，%d 条配方",
             len(config.INTERESTED_MACHINES),
             total_recipes,
-            total_sets,
         )
         return StageResult(
             stage=self.name,
@@ -265,7 +239,6 @@ class NormalizeHandler:
             stats={
                 "machines": len(config.INTERESTED_MACHINES),
                 "recipes": total_recipes,
-                "catalystSets": total_sets,
                 "outputHash": manifest["outputHash"],
             },
         )

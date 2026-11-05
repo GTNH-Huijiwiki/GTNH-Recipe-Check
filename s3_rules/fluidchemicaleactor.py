@@ -1,23 +1,46 @@
-"""流体化学反应器专属规则。
+﻿"""化工厂专属规则。"""
 
-该机器的反应条件在设计上只由编程电路区分，配方里的催化剂（nc 催化剂项）
-不参与区分。这里把全部催化组中的催化剂部分置空，只保留编程电路，使后续的
-「催化组删减」（reduce_catalyst_groups）、冲突图与着色都基于归一后的组。
+import logging
 
-本规则运行在 2「删减配方」阶段，且早于 reduce_catalyst_groups。
-注意：原本「带催化剂但无编程电路」的组，置空后将等价于「无条件反应」空组。
-"""
+from s0_contracts.schema import (
+    UNCONDITIONAL_SET_ID,
+    CatalystSet,
+    Recipe,
+    make_catalyst_set_id,
+    make_unconditional_set,
+)
+from s3_rules.helpers import replace_catalyst_sets
 
-from s2_normalize.grouped_schema import expand_catalyst_choices
+logger = logging.getLogger(__name__)
+
+_UNCONDITIONAL_SET = make_unconditional_set()
 
 
-def clean(recipes):
-    """将每个催化组的 catalysts 置空，仅保留 circuit。"""
-    filtered = []
-    for recipe in recipes:
-        recipe = expand_catalyst_choices(recipe)
-        for group in recipe.get("catalystGroups", []):
-            group["catalysts"] = []
-            group.pop("catalystChoices", None)
-        filtered.append(recipe)
-    return filtered
+def apply(recipe: Recipe):
+    """清空全部催化剂，只保留电路；无电路时转为无条件条件。"""
+    if not recipe.catalyst_group.sets:
+        return recipe
+
+    transformed = {}
+    for catalyst_set in recipe.catalyst_group.sets:
+        if catalyst_set.circuit is None:
+            transformed[UNCONDITIONAL_SET_ID] = _UNCONDITIONAL_SET
+            continue
+        candidate = CatalystSet(
+            set_id=make_catalyst_set_id("normal", (), catalyst_set.circuit),
+            catalysts=(),
+            circuit=catalyst_set.circuit,
+            kind="normal",
+        )
+        transformed[candidate.set_id] = candidate
+
+    sets = tuple(transformed[key] for key in sorted(transformed))
+    if any(item.kind == "unconditional" for item in sets):
+        sets = (_UNCONDITIONAL_SET,)
+    logger.debug(
+        "化工厂规则改写配方 %s：%d 个催化集 → %d 个",
+        recipe.recipe_id,
+        len(recipe.catalyst_group.sets),
+        len(sets),
+    )
+    return replace_catalyst_sets(recipe, sets)
