@@ -1,6 +1,7 @@
 ﻿"""组装机专属规则。"""
 
 import logging
+import re
 
 from s0_contracts.schema import Recipe
 from s3_rules.helpers import outputs_all, remove_variants_where_all_inputs_match
@@ -8,14 +9,10 @@ from s3_rules.helpers import outputs_all, remove_variants_where_all_inputs_match
 logger = logging.getLogger(__name__)
 
 _TROPHY_MARKER = "trophy"
-_CIRCUIT_24_KEY = "gregtech:gt.integrated_circuit:24"
-_MULTI_SUPERCONDUCTOR_PREFIXES = (
-    "2x Superconductor ",
-    "4x Superconductor ",
-    "8x Superconductor ",
-    "12x Superconductor ",
-    "16x Superconductor ",
-)
+_CIRCUIT_KEY_PREFIX = "gregtech:gt.integrated_circuit:"
+_CIRCUIT_24_KEY = f"{_CIRCUIT_KEY_PREFIX}24"
+_SINGLE_WIRE_PATTERN = re.compile(r"1x .+ Wire")
+_BUNDLED_WIRE_PATTERN = re.compile(r"\d+x .+ Wire")
 
 
 def _is_trophy_catalyst(item):
@@ -40,18 +37,44 @@ def _is_cable(item):
     return "Cable" in item.original_name
 
 
-def _is_multi_superconductor_wire(item):
-    return item.original_name.startswith(
-        _MULTI_SUPERCONDUCTOR_PREFIXES
-    ) and item.original_name.endswith(" Wire")
+def _is_wire(item):
+    """返回物品名称是否以 Wire 结尾，避免把 Cable 识别为导线。"""
+    return item.original_name.casefold().endswith(" wire")
+
+
+def _is_superconductor_wire(item):
+    """返回物品是否为超导导线。"""
+    return _is_wire(item) and "superconductor" in item.original_name.casefold()
+
+
+def _is_bundled_wire_recipe(recipe):
+    """判断唯一输入是否为 1x 导线，且唯一输出是否为 Nx 导线。"""
+    if recipe.output_group.fluids or len(recipe.output_group.items) != 1:
+        return False
+    if len(recipe.input_group.slots) != 1:
+        return False
+    slot = recipe.input_group.slots[0]
+    if len(slot.alternatives) != 1:
+        return False
+
+    input_item = slot.alternatives[0]
+    output_item = recipe.output_group.items[0]
+    if input_item.kind != "item" or output_item.kind != "item":
+        return False
+    if _is_superconductor_wire(output_item):
+        return False
+    return (
+        _SINGLE_WIRE_PATTERN.fullmatch(input_item.original_name) is not None
+        and _BUNDLED_WIRE_PATTERN.fullmatch(output_item.original_name) is not None
+    )
 
 
 def apply(recipe: Recipe):
     """应用组装机规则，返回保留后的配方或 None。"""
     recipe_id = recipe.recipe_id
-    if any(_is_multi_superconductor_wire(item) for item in recipe.output_group.items):
+    if _is_bundled_wire_recipe(recipe):
         logger.debug(
-            "组装机规则删除配方 %s：输出包含多重超导导线",
+            "组装机规则删除配方 %s：唯一输入为 1x 导线且输出为 Nx 导线",
             recipe_id,
         )
         return None
