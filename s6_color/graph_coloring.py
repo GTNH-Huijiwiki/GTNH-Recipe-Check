@@ -90,7 +90,7 @@ def _recipe_class_sizes(colors, node_coverages):
     )
 
 
-# 节点数档位扫描：单色类最大节点数从 _SIZE_SWEEP_MIN 起逐 1 放宽
+# 节点数档位扫描：单色类最大节点数从 _SIZE_SWEEP_MIN 起逐 1 放宽。
 _SIZE_SWEEP_MIN = 2
 
 

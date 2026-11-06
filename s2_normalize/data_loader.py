@@ -76,5 +76,5 @@ def load_ore_dictionary(data_dir: Path) -> dict:
     if isinstance(data, dict):
         for ore_name, keys in data.items():
             if isinstance(keys, list):
-                ore_dictionary[ore_name] = list(dict.fromkeys(keys))  # 去重保序
+                ore_dictionary[ore_name] = list(dict.fromkeys(keys))  # 去重保序。
     return ore_dictionary

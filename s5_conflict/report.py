@@ -142,6 +142,7 @@ def render_machine_report(
     relations,
     selected_by_id,
     normalized_by_id,
+    pair_threshold=None,
 ):
     """渲染单台机器的完整 Markdown 冲突报告。"""
     equivalence_index = _equivalence_index(relations)
@@ -150,34 +151,65 @@ def render_machine_report(
         for set_id, catalyst_set in selected_sets.items()
     }
     codes = _node_codes(graph)
+    all_edges = tuple(graph.get("edges", ()))
+    all_self_conflicts = tuple(graph.get("selfConflicts", ()))
+
+    def _included(item):
+        return (
+            pair_threshold is None
+            or len(item.get("conflicts", ())) < pair_threshold
+        )
+
+    edges = tuple(edge for edge in all_edges if _included(edge))
+    self_conflicts = tuple(
+        item for item in all_self_conflicts if _included(item)
+    )
+    omitted_edge_pairs = sum(
+        len(edge.get("conflicts", ())) for edge in all_edges
+    ) - sum(len(edge.get("conflicts", ())) for edge in edges)
+    omitted_self_pairs = sum(
+        len(item.get("conflicts", ())) for item in all_self_conflicts
+    ) - sum(len(item.get("conflicts", ())) for item in self_conflicts)
+
     node_pair_counts = Counter()
-    for edge in graph.get("edges", ()):
+    for edge in edges:
         pair_count = len(edge.get("conflicts", ()))
         node_pair_counts[edge["left"]] += pair_count
         node_pair_counts[edge["right"]] += pair_count
-    for item in graph.get("selfConflicts", ()):
+    for item in self_conflicts:
         node_pair_counts[item["setId"]] += len(item.get("conflicts", ()))
 
     edge_pairs = sum(
-        len(edge.get("conflicts", ())) for edge in graph.get("edges", ())
+        len(edge.get("conflicts", ())) for edge in edges
     )
     self_pairs = sum(
         len(item.get("conflicts", ()))
-        for item in graph.get("selfConflicts", ())
+        for item in self_conflicts
     )
     display_name = _MACHINE_NAMES.get(machine, machine)
     lines = [
         f"## 机器：{machine}（{display_name}）",
         "",
         f"- 冲突节点：{len(graph.get('nodes', ()))} 个",
-        f"- 节点间冲突对：{len(graph.get('edges', ()))} 对节点，{edge_pairs} 组配方对",
+        f"- 节点间冲突对：{len(edges)} 对节点，{edge_pairs} 组配方对",
         f"- 节点内自冲突：{self_pairs} 组配方对",
-        "",
-        "### 节点",
-        "",
-        "| 节点 | 催化剂条件 | 冲突配方对 |",
-        "|---|---|---:|",
     ]
+    if pair_threshold is not None:
+        lines.extend(
+            [
+                f"- 报告筛选：仅列出冲突配方对少于 {pair_threshold} 的节点关系",
+                f"- 未列出：节点间 {omitted_edge_pairs} 组配方对，节点内 {omitted_self_pairs} 组配方对",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "### 节点",
+            "",
+            "| 节点 | 催化剂条件 | 冲突配方对 |",
+            "|---|---|---:|",
+        ]
+    )
     for set_id in graph.get("nodes", ()):
         lines.append(
             "| {code} | {label} | {count} |".format(
@@ -189,7 +221,7 @@ def render_machine_report(
 
     lines.extend(["", "### 节点间冲突", ""])
     edges = sorted(
-        graph.get("edges", ()),
+        edges,
         key=lambda edge: (
             -len(edge.get("conflicts", ())),
             codes[edge["left"]],
@@ -250,7 +282,7 @@ def render_machine_report(
 
     lines.extend(["### 节点内自冲突", ""])
     self_conflicts = sorted(
-        graph.get("selfConflicts", ()),
+        self_conflicts,
         key=lambda item: codes.get(item["setId"], item["setId"]),
     )
     if not self_conflicts:
@@ -285,13 +317,17 @@ def render_machine_report(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def render_conflict_report(machine_sections):
+def render_conflict_report(machine_sections, pair_threshold=None):
     """拼装完整的人类可读冲突报告。"""
     header = [
         "# 冲突结果",
         "> - `⊃`：左侧配方的输入条件包含右侧，可能提前触发右侧配方。",
         "> - `⇄`：双向包含/触发。",
         "> - 配方格式：`输入 + 催化剂 → 输出`。",
-        "",
     ]
+    if pair_threshold is not None:
+        header.append(
+            f"> - 报告筛选：仅列出冲突配方对少于 {pair_threshold} 的节点关系。"
+        )
+    header.append("")
     return "\n".join(header) + "\n\n".join(machine_sections).rstrip() + "\n"

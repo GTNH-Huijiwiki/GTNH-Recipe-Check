@@ -16,7 +16,7 @@ _WILDCARD_META = ":32767"
 # False：保留原通配 key；True：展开（展开结果同名时折叠为虚拟 key）。
 EXPAND_WILDCARD_32767 = False
 
-# 已就“匹配过多”告警过的通配 key（每个 key 只告警一次，避免刷屏）
+# 已就“匹配过多”告警过的通配 key（每个 key 只告警一次，避免刷屏）。
 _WILDCARD_WARNED = set()
 
 
@@ -143,7 +143,7 @@ def expand_ore_catalysts(catalysts, ore_dictionary, item_keys=None, translations
                 replacement["key"] = choice
                 names = split_virtual_key(choice)
                 if names:
-                    # 虚拟 key 不在翻译表中，这里把名字一并携带，供翻译阶段识别
+                    # 虚拟 key 不在翻译表中，这里把名字一并携带，供翻译阶段识别。
                     replacement["originalName"] = names[0]
                     replacement["translatedName"] = names[1]
                 next_alternatives.append(current + [replacement])

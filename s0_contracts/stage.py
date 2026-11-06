@@ -14,7 +14,8 @@ class RunContext:
     raw_dir: Path
     data_dir: Path
     output_dir: Path
-    generate_conflict_report: bool = False
+    generate_conflict_report: bool = True
+    conflict_report_pair_threshold: int | None = 3
     no_rules: bool = False
 
 

@@ -40,12 +40,14 @@ def _parse_args():
             "常用示例:\n"
             "  python main.py\n"
             "      执行 normalize → rules → cover → conflict → color\n"
+            "  python main.py --stage conflict\n"
+            "      只重建冲突图，并默认生成冲突配方对少于 3 的简版报告 conflicts.md\n"
             "  python main.py --stage conflict --conflict-report\n"
             "      只重建冲突图，并生成完整人类可读报告 conflicts.md\n"
             "  python main.py --no-rules\n"
             "      跳过全部 s3 机器规则，结果写入 Output/<版本>-no-rules/\n"
             "  python main.py --stage all --no-rules --conflict-report\n"
-            "      从 Raw 开始执行完整无规则链路，并生成冲突报告"
+            "      从 Raw 开始执行完整无规则链路，并生成冲突报告\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -57,13 +59,19 @@ def _parse_args():
             "conflict / color / all；不传时执行 normalize 到 color"
         ),
     )
-    parser.add_argument(
+    report_group = parser.add_mutually_exclusive_group()
+    report_group.add_argument(
         "--conflict-report",
         action="store_true",
         help=(
-            "生成完整人类可读冲突报告 conflict_graph/conflicts.md；"
-            "默认关闭，仅当本次运行包含 conflict 阶段时生效"
+            "生成不筛选的完整人类可读冲突报告 "
+            "conflict_graph/conflicts.md"
         ),
+    )
+    report_group.add_argument(
+        "--no-conflict-report",
+        action="store_true",
+        help="不生成人类可读冲突报告 conflicts.md",
     )
     parser.add_argument(
         "--no-rules",
@@ -97,7 +105,12 @@ def main():
         raw_dir=config.DUMPER_DIR,
         data_dir=config.DATA_SPLIT_DIR,
         output_dir=output_dir,
-        generate_conflict_report=args.conflict_report,
+        generate_conflict_report=not args.no_conflict_report,
+        conflict_report_pair_threshold=(
+            None
+            if args.conflict_report
+            else config.CONFLICT_REPORT_PAIR_THRESHOLD
+        ),
         no_rules=args.no_rules,
     )
     counter = configure_logging(log_file)

@@ -75,7 +75,7 @@ def abstract_group_map(reduction_metadata):
     return abstract_groups
 
 
-# 空催化组占位电路的 key（展示为“编程电路0”）
+# 空催化组占位电路的 key（展示为“编程电路0”）。
 _EMPTY_CIRCUIT_KEY = "__circuit_0"
 
 
@@ -161,7 +161,7 @@ def readable_group_label(group, abstract_groups):
     if circuit_labels:
         label = f"{label} / {'+'.join(circuit_labels)}"
     elif not group.get("catalysts"):
-        # 空催化组（无催化剂、无电路）= 无条件反应的特殊组，展示为编程电路0
+        # 空催化组（无催化剂、无电路）= 无条件反应的特殊组，展示为编程电路0。
         label = f"{label} / 编程电路0"
     return label
 

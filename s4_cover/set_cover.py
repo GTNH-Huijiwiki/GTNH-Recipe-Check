@@ -1,4 +1,4 @@
-"""Small exact minimum set-cover solver used by catalyst reduction."""
+"""催化组约简使用的小规模精确最小集合覆盖求解器。"""
 
 from __future__ import annotations
 
@@ -44,12 +44,11 @@ def _remove_dominated(candidates):
 
 
 def minimum_set_cover(universe, candidates):
-    """Return a minimum-cardinality cover with deterministic tie-breaking.
+    """返回基数最小且结果确定的集合覆盖。
 
-    candidates is an iterable of mappings with a key and an iterable coverage.
-    The return value is (selected_keys, stats).  The solver is exact: it uses
-    dominance reduction, essential-candidate propagation, greedy upper
-    bounding and branch-and-bound on the remaining universe.
+    candidates 是包含 key 与 coverage 的映射序列。
+    返回值为 (selected_keys, stats)。求解器使用支配约简、必选候选传播、
+    贪心上界与剩余全集上的分支限界，保证精确求解。
     """
 
     elements = list(dict.fromkeys(universe))
@@ -94,7 +93,7 @@ def minimum_set_cover(universe, candidates):
     seen_depth = {}
     search_nodes = 0
 
-    # Candidates that uniquely cover any remaining element are mandatory.
+    # 能唯一覆盖任一剩余元素的候选是必选项。
     mandatory = []
     uncovered = universe_mask
     while True:
@@ -151,8 +150,8 @@ def minimum_set_cover(universe, candidates):
             return
         seen_depth[mask] = len(chosen)
 
-        # Branch on the least-covered element.  This is the standard exact
-        # set-cover branching rule and keeps the search small on our graphs.
+        # 选择覆盖元素最少的元素进行分支。这是标准的精确集合覆盖分支规则，
+        # 能让搜索在本项目的图上保持较小规模。
         candidate_options = None
         for bit in range(len(elements)):
             element_mask = 1 << bit

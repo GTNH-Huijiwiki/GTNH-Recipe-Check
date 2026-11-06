@@ -116,7 +116,7 @@ def _catalyst_combination(catalyst_set):
     names = sorted(
         {_material_name(catalyst) for catalyst in catalyst_set.catalysts}
     )
-    return "+".join(names) or "无催化剂"
+    return "+".join(names)
 
 
 def _group_label(sets, equivalence_index=None, all_sets=None):
@@ -133,7 +133,9 @@ def _group_label(sets, equivalence_index=None, all_sets=None):
         )
         alternatives = []
         for member in members:
-            alternatives.append(_catalyst_combination(member))
+            combination = _catalyst_combination(member)
+            if combination:
+                alternatives.append(combination)
             if member.circuit:
                 circuits.add(
                     (
@@ -146,10 +148,9 @@ def _group_label(sets, equivalence_index=None, all_sets=None):
                 circuits.add(
                     ("__circuit_0", _UNCONDITIONAL_CIRCUIT_LABEL, 0)
                 )
-        catalyst_labels.add(" or ".join(sorted(set(alternatives))))
-    catalyst_label = " | ".join(sorted(catalyst_labels)) or "无催化剂"
-    if not circuits:
-        return catalyst_label
+        if alternatives:
+            catalyst_labels.add(" or ".join(sorted(set(alternatives))))
+    catalyst_label = " | ".join(sorted(catalyst_labels))
     ordered = sorted(
         circuits,
         key=lambda item: (
@@ -158,7 +159,12 @@ def _group_label(sets, equivalence_index=None, all_sets=None):
             item[1],
         ),
     )
-    return f"{catalyst_label} / {'+'.join(item[1] for item in ordered)}"
+    circuit_label = "+".join(item[1] for item in ordered)
+    if not catalyst_label:
+        catalyst_label = "无催化剂"
+    if circuit_label:
+        return f"{catalyst_label} / {circuit_label}"
+    return catalyst_label
 
 
 def _order_key(group):
@@ -330,6 +336,31 @@ def _graph_matrix(graph):
     return matrix
 
 
+def _document_objective(document):
+    if not isinstance(document, dict):
+        return None
+    summary = document.get('summary')
+    if not isinstance(summary, dict):
+        return None
+    group_count = summary.get('groupCount')
+    recipe_class_sizes = summary.get('recipeClassSizes')
+    if not isinstance(group_count, int) or not isinstance(recipe_class_sizes, list):
+        return None
+    return group_count, tuple(recipe_class_sizes)
+
+
+def _choose_document(new_document, previous_document, same_input):
+    if not same_input or previous_document is None:
+        return new_document, 'new'
+    new_objective = _document_objective(new_document)
+    previous_objective = _document_objective(previous_document)
+    if previous_objective is None:
+        return new_document, 'new'
+    if new_objective is not None and new_objective < previous_objective:
+        return new_document, 'improved'
+    return previous_document, 'retained'
+
+
 class ColorHandler:
     """对冲突图着色并翻译为最终输入组。"""
 
@@ -354,12 +385,37 @@ class ColorHandler:
         }
 
         output_dir = context.output_dir / "input_groups"
-        if output_dir.exists():
-            shutil.rmtree(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        previous_manifest = None
+        manifest_path = output_dir / "manifest.json"
+        if manifest_path.is_file():
+            try:
+                previous_manifest = json.loads(
+                    manifest_path.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                previous_manifest = None
+        same_input = (
+            previous_manifest is not None
+            and previous_manifest.get("upstream") == upstream
+        )
+        previous_documents = {}
+        if same_input:
+            for machine in sorted(config.INTERESTED_MACHINES):
+                path = output_dir / "machines" / machine / "input_groups.json"
+                try:
+                    previous_documents[machine] = json.loads(
+                        path.read_text(encoding="utf-8")
+                    )
+                except (OSError, json.JSONDecodeError):
+                    same_input = False
+                    previous_documents = {}
+                    break
 
         strategy = get_strategy(config.COLORING_STRATEGY)
         total_groups = 0
+        retained_count = 0
+        improved_count = 0
+        documents = {}
         for machine in sorted(config.INTERESTED_MACHINES):
             log_machine(machine)
             recipes = _load_recipes(
@@ -433,10 +489,38 @@ class ColorHandler:
                     "recipeClassSizes": sizes,
                 },
             }
-            _write_json(
-                output_dir / "machines" / machine / "input_groups.json",
-                document,
+            previous_document = previous_documents.get(machine)
+            new_objective = _document_objective(document)
+            previous_objective = (
+                _document_objective(previous_document)
+                if previous_document is not None
+                else None
             )
+            document, status = _choose_document(
+                document,
+                previous_document,
+                same_input,
+            )
+            documents[machine] = document
+            input_groups = document["inputGroups"]
+            top_level_containments = document.get("topLevelContainments", ())
+            sizes = document["summary"]["recipeClassSizes"]
+            if status == "retained":
+                retained_count += 1
+                logger.info(
+                    "着色结果未优于上次，保留旧结果：新 %s，旧 %s",
+                    new_objective,
+                    previous_objective,
+                )
+            elif status == "improved":
+                improved_count += 1
+                logger.info(
+                    "着色结果优于上次，记录新结果：旧 %s，新 %s",
+                    previous_objective,
+                    new_objective,
+                )
+            else:
+                logger.info("着色结果已记录")
             logger.info(
                 "着色完成：%d 个输入组，最大组覆盖 %d 条配方",
                 len(input_groups),
@@ -453,6 +537,15 @@ class ColorHandler:
             _log_top_level_containments(top_level_containments)
             total_groups += len(input_groups)
 
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for machine, document in documents.items():
+            _write_json(
+                output_dir / "machines" / machine / "input_groups.json",
+                document,
+            )
+
         manifest = _build_manifest(upstream, output_dir)
         _write_json(output_dir / "manifest.json", manifest)
         logger.info(
@@ -466,6 +559,8 @@ class ColorHandler:
             stats={
                 "machines": len(config.INTERESTED_MACHINES),
                 "inputGroups": total_groups,
+                "retained": retained_count,
+                "improved": improved_count,
                 "outputHash": manifest["outputHash"],
             },
         )

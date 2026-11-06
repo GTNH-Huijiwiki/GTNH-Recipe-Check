@@ -37,7 +37,7 @@ GTNH-Recipe-Check/
 ├── s5_conflict/            # 4. 无向冲突矩阵构建
 ├── s6_color/               # 5. 图染色搜索与最终催化组合并
 ├── s9_validation/          # 测试、实验与手工复核工具
-├── Data/                   # 第一步产物
+├── Data/                   # 预处理产物
 └── Output/<version>/                 # s2-s6 的阶段性产物
 ```
 
@@ -58,21 +58,21 @@ GTNH-Recipe-Check/
 
 ## 快速开始
 
-第一步是一个完整处理器：`Raw -> Items -> OreDictionary -> Recipes -> Data`。三个子任务必须在同一处理器内按此顺序执行，因为配方关联依赖完整物品记录中的 `rawKey`/`nbt`。
+预处理是一个完整处理器：`Raw -> Items -> OreDictionary -> Recipes -> Data`。三个子任务必须在同一处理器内按此顺序执行，因为配方关联依赖完整物品记录中的 `rawKey`/`nbt`。
 
 ```bash
-python main.py --stage preprocess       # 第一步：Raw -> Data
+python main.py --stage preprocess       # 预处理：Raw -> Data
 python main.py --stage normalize        # 后续阶段
 python main.py --stage all              # 从 Raw 开始完整执行
 ```
 
 - 实现入口是 `s1_preprocess/handler.py`，`split.py` 只提供数据变换，不再作为独立 CLI 保留任务选择分支。
 - 产物目录由 `config.DATA_SPLIT_DIR` 指定；换版本时修改 `DUMPER_DIR` 与 `DATA_SPLIT_DIR`。
-- 第一步直接以 `GTNH-Chinese-Wiki-Toolchain/databaseDump/split_all.py` 为参考实现，保留本项目消费的数据变换，不保留 Wiki 页面、图片、tooltip 等展示层代码。
+- 预处理直接以 `GTNH-Chinese-Wiki-Toolchain/databaseDump/split_all.py` 为参考实现，保留本项目消费的数据变换，不保留 Wiki 页面、图片、tooltip 等展示层代码。
 
 #### DUMPER_DIR 需要包含的文件
 
-第一步处理器只读以下四项（均为 `DUMPER_DIR` 下的相对路径，由 GTNH Dumper 导出）：
+预处理处理器只读以下四项（均为 `DUMPER_DIR` 下的相对路径，由 GTNH Dumper 导出）：
 
 | 路径 | 顶层结构 | 用途 |
 |---|---|---|
@@ -88,16 +88,17 @@ python main.py --stage all              # 从 Raw 开始完整执行
 ### 五阶段独立执行
 
 ```bash
-python main.py --stage preprocess   # 第一步：Raw -> Data
+python main.py --stage preprocess   # s1：Raw -> Data（可选预处理）
 python main.py --stage normalize    # s2：规范化输入/催化组合
 python main.py --stage rules        # s3：应用机器规则，生成 selected_recipes
 python main.py --stage cover        # s4：催化集关系与最小覆盖，生成 catalyst_pick
-python main.py --stage conflict     # s5：构建无向冲突图，生成 conflict_graph
-python main.py --stage conflict --conflict-report  # 额外生成完整人类可读冲突报告
+python main.py --stage conflict     # s5：构建冲突图，并默认生成冲突配方对少于 3 的简版报告
+python main.py --stage conflict --conflict-report  # 生成不筛选的完整人类可读冲突报告
+python main.py --stage conflict --no-conflict-report  # 不生成人类可读冲突报告
 python main.py --no-rules          # 跳过 s3 规则，输出到 Output/<版本>-no-rules
 python main.py --stage color        # s6：图着色并翻译为最终输入组
 python main.py --stage all          # 依次执行 preprocess -> normalize -> rules -> cover -> conflict -> color
-python main.py                      # 默认执行 normalize -> rules
+python main.py                      # 默认执行 normalize -> rules -> cover -> conflict -> color
 ```
 
 若 `Data/` 已存在，通常只运行：
@@ -124,6 +125,10 @@ python -m unittest discover -s s9_validation -v
 第三阶段最小覆盖的对象是**独特 CatalystSet**。若一个催化集包含多个催化剂，则它可以覆盖同电路下由其全部子集构成的催化集。无催化条件在第三阶段实体化为特殊 `unconditional` 催化集，不再延迟到冲突图阶段创建虚拟节点。
 
 第四阶段输出无向冲突矩阵；第五阶段对矩阵执行多轮随机化 DSATUR 和颜色容量扫描，最终颜色类合并为新的 `CatalystGroup`。
+
+最后一步每次都会重新搜索。若 `selected_recipes`、`catalyst_pick`、`conflict_graph` 的输入哈希不变，则按机器比较新旧目标值：只有新结果严格优于上次结果时才替换，相同或更差时保留旧结果。
+
+输入组标签按整个组判断：组内存在任何实际催化剂时，只显示实际催化剂，不显示“无催化剂”；只有组内完全没有实际催化剂时才显示“无催化剂”，并在右侧显示该组全部编程电路。
 
 ### 催化组覆盖关系、纯包含链与根组合并
 
@@ -169,7 +174,8 @@ python -m unittest discover -s s9_validation -v
 | 参数 | 说明 |
 |---|---|
 | `--stage <name>` | 单独执行 `preprocess` / `normalize` / `rules` / `cover` / `conflict` / `color` / `all`。 |
-| `--conflict-report` | 生成完整人类可读冲突报告 `conflict_graph/conflicts.md`；默认关闭。 |
+| `--conflict-report` | 生成不筛选的完整人类可读冲突报告 `conflict_graph/conflicts.md`。 |
+| `--no-conflict-report` | 不生成人类可读冲突报告。默认会生成仅包含冲突配方对少于 3 的节点关系的简版报告。 |
 | `--no-rules` | s3 不应用任何机器规则，原样复制 normalized recipes；全部产物写入 `Output/<版本>-no-rules/`，不影响正式输出。 |
 
 不传 `--stage` 时执行 `normalize → rules → cover → conflict → color`；`--stage all` 额外从 Raw 开始执行预处理。
@@ -193,6 +199,7 @@ python -m unittest discover -s s9_validation -v
 | `CONFLICT_GRAPH_DIR` | 无向冲突图产物目录 | `Output/<version>/conflict_graph` |
 | `CONFLICT_MODE` | 冲突检查发配模式 | `blocking` |
 | `CONFLICT_MAX_PAIRS` | 每个催化集对和每个自冲突组最多保留的冲突配方对数 | `100` |
+| `CONFLICT_REPORT_PAIR_THRESHOLD` | 默认报告只列出冲突配方对少于该值的节点关系；`--conflict-report` 可生成完整报告 | `3` |
 | `INPUT_GROUPS_DIR` | 最终输入组方案目录 | `Output/<version>/input_groups` |
 | `COLORING_STRATEGY` | 图着色策略 | `dsatur_multistart` |
 | `GROUP_ORPHAN_MODE` | 孤儿标记偏好：`contains` / `only`（两种 flag 始终记录，不删除配方） | `contains` |
@@ -234,7 +241,7 @@ flowchart LR
 | `Output/<version>/catalyst_pick/machines/<machine>/coverage.json` | 独特催化集、关系边、等价组、顶层包含统计和最小覆盖结果 |
 | `Output/<version>/conflict_graph/manifest.json` | s5 上下游哈希 |
 | `Output/<version>/conflict_graph/machines/<machine>/graph.json` | 无向冲突图、冲突配方对和自冲突 |
-| `Output/<version>/conflict_graph/conflicts.md` | 可选的人类可读冲突报告：仅使用 `--conflict-report` 时生成，包含节点催化剂、全部包含方向和完整配方对、节点内自冲突 |
+| `Output/<version>/conflict_graph/conflicts.md` | 默认生成的人类可读冲突报告：仅列出冲突配方对少于 3 的节点关系；使用 `--conflict-report` 时改为不筛选的完整报告 |
 | `Output/<version>/input_groups/manifest.json` | s6 上下游哈希 |
 | `Output/<version>/input_groups/machines/<machine>/input_groups.json` | 最终输入组、等价催化选项（`or`）、顶层包含关系、展示标签和配方覆盖数 |
 
@@ -321,7 +328,7 @@ $$ Recipes(G) = \bigcup_{\emptyset \neq S \subseteq G} Recipes(S) $$
 ## 方案流程
 
 ### 0. 数据准备（s1_preprocess）
-把 Dumper 导出整理为 `Data/<版本>/`：`Items.json`（`key`/`originalName`/`translatedName`）、`OreDictionary.json`（`{矿辞典名: [key...]}`）、`Recipes/<来源>/GTNEIDefaultHandler_<机器>.json`。第一步严格同步 Wiki Toolchain 的数据变换：物品/流体 key 归一化、`nbt_regress_cache`、`nbt_identity` NBT 关联、`:32767` 通配展开、矿辞通配校验和 `otherItems` 角色归类。
+把 Dumper 导出整理为 `Data/<版本>/`：`Items.json`（`key`/`originalName`/`translatedName`）、`OreDictionary.json`（`{矿辞典名: [key...]}`）、`Recipes/<来源>/GTNEIDefaultHandler_<机器>.json`。预处理严格同步 Wiki Toolchain 的数据变换：物品/流体 key 归一化、`nbt_regress_cache`、`nbt_identity` NBT 关联、`:32767` 通配展开、矿辞通配校验和 `otherItems` 角色归类。
 
 ### 1. 规范化
 
@@ -371,6 +378,17 @@ $$ Recipes(G) = \bigcup_{\emptyset \neq S \subseteq G} Recipes(S) $$
    - **跨次运行也只保留最优**：`graph_fingerprint` 一致（冲突图未变）且历史方案不差时，沿用历史结果并重新套用到当前配方。
    - 合并后的催化组可含多个编程电路，标签展示时按编号升序，无编号的「编程电路0」排最前。
    - **输出组间排序**（`group_output_order_key`）：`colored_grouped_recipes/{machine}.json` 中每条配方的催化组、`coloring.json` 与终端列出的各组，均按「组内最小编号升序」排列；无编程电路的组排最后；完全空组（无条件反应）视作「编程电路0」排最前。
+
+---
+
+## 代码注释规范
+
+- 注释与文档字符串统一使用简体中文，代码标识符、协议名和专有名词保留原文。
+- 行注释使用 `# ` 开头，完整说明句末使用中文句号 `。`。
+- 多行注释只在最后一行收尾加句号，续行不重复标点。
+- 分区注释统一为 `# ---- 中文标题 ----`，标题末尾不加句号。
+- 文档字符串使用三引号，首行为中文概述并以 `。` 结尾；多行说明与首行之间空一行。
+- 文档字符串中的参数、返回、用法和说明标签统一使用中文冒号：`参数：`、`返回：`、`用法：`、`说明：`。
 
 ---
 

@@ -177,6 +177,7 @@ class ConflictHandler:
                         relations,
                         selected_by_id,
                         normalized_by_id,
+                        pair_threshold=context.conflict_report_pair_threshold,
                     )
                 )
             for item in graph["selfConflicts"]:
@@ -217,7 +218,10 @@ class ConflictHandler:
         if report_sections is not None:
             report_path = output_dir / "conflicts.md"
             report_path.write_text(
-                render_conflict_report(report_sections),
+                render_conflict_report(
+                    report_sections,
+                    pair_threshold=context.conflict_report_pair_threshold,
+                ),
                 encoding="utf-8",
             )
         manifest = _build_manifest(upstream, output_dir)

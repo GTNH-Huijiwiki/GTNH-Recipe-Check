@@ -315,7 +315,7 @@ Output/<version>/catalyst_pick/
 ~~~text
 Output/<version>/conflict_graph/
 ├── manifest.json
-├── conflicts.md（仅 --conflict-report）
+├── conflicts.md（默认生成简版；--conflict-report 生成完整版）
 └── machines/
     └── <machine>/
         └── graph.json
@@ -329,8 +329,9 @@ Output/<version>/conflict_graph/
 - 边保存实际冲突配方对；
 - 自冲突保存在 selfConflicts，不生成自环；每个自冲突配方对记一条 `WARNING` 并计入问题数；
 - `CONFLICT_MAX_PAIRS` 可限制每组冲突配方对数，默认 `100`；
-- 仅在 `--conflict-report` 开启时输出完整的人类可读 Markdown 报告；
-- 报告中不截断冲突配方对，并给出机器、节点催化剂条件和完整配方。
+- 默认输出人类可读 Markdown 报告，但只列出冲突配方对少于 3 的节点间关系和节点内自冲突组；
+- `--conflict-report` 输出不筛选的完整报告；`--no-conflict-report` 不输出报告；
+- 完整报告中不截断冲突配方对，并给出机器、节点催化剂条件和完整配方。
 
 ### s6_color
 
@@ -355,10 +356,12 @@ Output/<version>/input_groups/
 职责：
 
 - 对无向冲突图执行多轮 DSATUR 着色；
+- 输入哈希不变时按机器比较新旧目标值，只有新结果严格更优才替换，否则保留旧结果；
 - 同色 CatalystSet 互不冲突；
 - 一个最终输入组表示多个 CatalystSet 的 OR；
 - 将内部颜色编号翻译为输入组1、输入组2……；
 - 等价催化集展开为实际催化剂选项，并以 `or` 连接；
+- 输入组标签按整个组判断：存在实际催化剂时只显示实际催化剂；完全没有实际催化剂时才显示“无催化剂”，右侧显示全部编程电路；
 - 输出每个顶层包含类的内容和直接严格包含关系；
 - 每个输入组统计统合后的独立配方覆盖数；
 - 最终输出不暴露颜色编号。

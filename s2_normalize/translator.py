@@ -21,7 +21,7 @@ def _translate_value(value, translations, missing_keys):
     if "key" in value:
         key = value["key"]
         if is_virtual_key(key):
-            # 虚拟 key 不在翻译表中，名称已在展开阶段携带，原样保留
+            # 虚拟 key 不在翻译表中，名称已在展开阶段携带，原样保留。
             names = {
                 "originalName": value.get("originalName", key),
                 "translatedName": value.get("translatedName", key),
@@ -44,7 +44,7 @@ def _translate_value(value, translations, missing_keys):
                 )
         return translated
 
-    # 没有 key 的对象递归处理其值
+    # 没有 key 的对象递归处理其值。
     return {
         field: _translate_value(field_value, translations, missing_keys)
         for field, field_value in value.items()
