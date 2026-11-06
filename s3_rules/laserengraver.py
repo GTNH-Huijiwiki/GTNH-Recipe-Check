@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 _GEM_PREFIXES = ("Chipped ", "Flawed ", "Flawless ", "Exquisite ")
 _REMOVED_CATALYST_KEYS = {"dreamcraft:ReinforcedGlassLense"}
 _REMOVED_CATALYST_NAMES = {"Reinforced Glass Lens"}
+_PRESERVED_MEDIA_OUTPUT_MARKERS = ("openos", "lua bios")
 
 
 def _uses_removed_catalyst(catalyst_set):
@@ -22,6 +23,15 @@ def _uses_removed_catalyst(catalyst_set):
         item.key in _REMOVED_CATALYST_KEYS
         or item.original_name in _REMOVED_CATALYST_NAMES
         for item in catalyst_set.catalysts
+    )
+
+
+def _has_preserved_media_output(recipe):
+    """返回配方输出中是否包含需要保留的 OpenOS 或 Lua Bios。"""
+    return any(
+        marker in item.original_name.casefold()
+        for item in recipe.output_group.items
+        for marker in _PRESERVED_MEDIA_OUTPUT_MARKERS
     )
 
 
@@ -59,7 +69,7 @@ def apply(recipe: Recipe):
         logger.debug("激光蚀刻机规则删除配方 %s：输出全部为宝石", recipe.recipe_id)
         return None
 
-    if input_slot_count(recipe) == 1:
+    if input_slot_count(recipe) == 1 and not _has_preserved_media_output(recipe):
         recipe = remove_variants_where_all_inputs_match(
             recipe,
             lambda item: item.original_name in {"Floppy Disk", "EEPROM"},
